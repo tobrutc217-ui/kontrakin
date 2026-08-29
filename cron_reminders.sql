@@ -1,0 +1,14 @@
+-- V5: schedule daily invoice reminders after deploying send-invoice-reminders.
+-- Recommended schedule: 08:00 WIB = 01:00 UTC.
+-- Store project URL and publishable key in Supabase Vault first, then create the job.
+-- See Supabase Cron docs for Vault/pg_net setup.
+-- Example:
+-- select vault.create_secret('https://YOUR_PROJECT_REF.supabase.co', 'project_url');
+-- select vault.create_secret('YOUR_PUBLISHABLE_KEY', 'publishable_key');
+-- select cron.schedule('kontrakin-daily-invoice-reminders', '0 1 * * *', $$
+--   select net.http_post(
+--     url := (select decrypted_secret from vault.decrypted_secrets where name='project_url') || '/functions/v1/send-invoice-reminders',
+--     headers := jsonb_build_object('Content-Type','application/json','apikey',(select decrypted_secret from vault.decrypted_secrets where name='publishable_key')),
+--     body := '{}'::jsonb
+--   );
+-- $$);

@@ -1,0 +1,4 @@
+-- V6: automatic monthly billing is derived from tenants.lease_start and rooms.monthly_rate.
+-- No schema change is required for the automatic calculation itself.
+-- This file is intentionally informational so it can be run safely if desired.
+-- Invoice uniqueness is already enforced by unique(tenant_id, due_date) in schema.sql.
