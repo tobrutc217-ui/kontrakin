@@ -1,161 +1,404 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useEffect, useState, useMemo } from 'react';
 import { createRoot } from 'react-dom/client';
 import {
-  Bell, Building2, CalendarDays, ChevronRight, CircleDollarSign, CreditCard,
-  Ellipsis, FileText, Home, LayoutDashboard, Menu, MessageCircle, Moon, Monitor,
-  Plus, RefreshCw, Settings, Sparkles, Sun, Users, WalletCards, X, LogOut,
-  Trash2, Pencil, Wrench, UserPlus, CheckCircle2, Save, DoorOpen, ReceiptText, Download, Mail, FileSpreadsheet
+  Building2, Users, CreditCard, WalletCards, Settings, LayoutDashboard,
+  Menu, Sun, RefreshCw, X, LogOut, Bell
 } from 'lucide-react';
+
 import './styles.css';
 import { supabase } from './supabase';
+import { initials } from './utils';
 
-const rupiah = n => new Intl.NumberFormat('id-ID', { style: 'currency', currency: 'IDR', maximumFractionDigits: 0 }).format(Number(n || 0));
-const formatMoneyInput = value => { const digits = String(value ?? '').replace(/\D/g, ''); return digits ? new Intl.NumberFormat('en-US', { maximumFractionDigits: 0 }).format(Number(digits)) : ''; };
-const parseMoneyInput = value => Number(String(value ?? '').replace(/\D/g, '') || 0);
-function MoneyInput({ value, onChange, placeholder='1,500,000', required=false }) { return <input inputMode="numeric" value={formatMoneyInput(value)} onChange={e=>onChange(String(e.target.value).replace(/\D/g,''))} placeholder={placeholder} required={required} className="money-input" autoComplete="off"/>; }
-const initials = name => (name || '?').split(/\s+/).slice(0, 2).map(x => x[0]).join('').toUpperCase();
-const today = () => { const d=new Date(); return isoDate(d); };
-const parseDateLocal = value => { const [y,m,d]=String(value).split('-').map(Number); return new Date(y,(m||1)-1,d||1); };
-const isoDate = d => `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
-const daysInMonth = (year, monthIndex) => new Date(year, monthIndex+1, 0).getDate();
-const monthDueDate = (year, monthIndex, day) => isoDate(new Date(year, monthIndex, Math.min(day, daysInMonth(year, monthIndex))));
-const addMonthsDate = (dateValue, months) => { const d=parseDateLocal(dateValue); const target=new Date(d.getFullYear(), d.getMonth()+months, 1); return monthDueDate(target.getFullYear(), target.getMonth(), d.getDate()); };
-const roundDownTo1k = value => Math.max(0, Math.floor(Number(value||0)/1000)*1000);
-const proratedAmount = (monthlyRate, days) => roundDownTo1k((Number(monthlyRate||0)/30)*Math.max(1,days));
-const billingDayForTenant = t => Number(t?.billing_day || (t?.lease_start ? parseDateLocal(t.lease_start).getDate() : 1));
-const daysBetweenInclusive = (fromValue, toValue) => { const a=parseDateLocal(fromValue), b=parseDateLocal(toValue); return Math.max(1, Math.floor((b-a)/86400000)+1); };
-const overdueDays = dueDate => { const d=parseDateLocal(dueDate), t=parseDateLocal(today()); return Math.max(0, Math.floor((t-d)/86400000)); };
-const overdueMonths = (dueDate, leaseStart) => { const d=parseDateLocal(dueDate), t=parseDateLocal(today()); if(t<=d)return 0; return Math.max(1,(t.getFullYear()-d.getFullYear())*12+t.getMonth()-d.getMonth() + (t.getDate()>=d.getDate()?1:0)); };
-const csvEscape = value => { const s = String(value ?? ''); return `"${s.replaceAll('\"','\"\"')}"`; };
-const downloadCSV = (filename, headers, rows) => {
-  const csv = '\uFEFF' + [headers, ...rows].map(row => row.map(csvEscape).join(',')).join('\n');
-  const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
-  const url = URL.createObjectURL(blob); const a = document.createElement('a'); a.href=url; a.download=filename; a.click(); URL.revokeObjectURL(url);
-};
-
-function Login() {
-  const [email, setEmail] = useState(''); const [password, setPassword] = useState(''); const [busy, setBusy] = useState(false); const [error, setError] = useState('');
-  const submit = async e => { e.preventDefault(); setBusy(true); setError(''); const { error } = await supabase.auth.signInWithPassword({ email, password }); setBusy(false); if (error) setError(error.message); };
-  return <div className="login-shell"><div className="login-card">
-    <div className="brand login-brand"><div className="brand-mark"><Building2 size={20}/></div><span>Kos Cendana</span></div>
-    <h1>Masuk ke dashboard</h1><p>Gunakan akun admin Supabase untuk mengelola properti.</p>
-    <form onSubmit={submit} className="login-form"><label>Email<input type="email" value={email} onChange={e=>setEmail(e.target.value)} placeholder="admin@email.com" required/></label><label>Password<input type="password" value={password} onChange={e=>setPassword(e.target.value)} placeholder="••••••••" required/></label>{error&&<div className="error-box">{error}</div>}<button className="add-button login-button" disabled={busy}>{busy?'Memproses...':'Masuk'}</button></form>
-    <small>Akun dibuat di Supabase Authentication.</small>
-  </div></div>;
-}
+// Import Modular Components
+import { Login } from './components/Login';
+import { Dashboard } from './components/Dashboard';
+import { PropertyManager } from './components/PropertyManager';
+import { TenantManager } from './components/TenantManager';
+import { InvoiceManager } from './components/InvoiceManager';
+import { FinanceManager } from './components/FinanceManager';
+import { SettingsManager } from './components/SettingsManager';
 
 function App({ user }) {
-  const [section,setSection]=useState('Dashboard'); const [mobileOpen,setMobileOpen]=useState(false); const [toast,setToast]=useState(''); const [loading,setLoading]=useState(true); const [error,setError]=useState(''); const [hasLoadedOnce,setHasLoadedOnce]=useState(false);
-  const [properties,setProperties]=useState([]),[rooms,setRooms]=useState([]),[tenants,setTenants]=useState([]),[invoices,setInvoices]=useState([]),[transactions,setTransactions]=useState([]);
-  const [selectedPropertyId,setSelectedPropertyId]=useState(()=>localStorage.getItem('selected-property')||'all');
-  const [theme,setTheme]=useState(()=>localStorage.getItem('kos-theme')||'system'); const [systemDark,setSystemDark]=useState(()=>window.matchMedia('(prefers-color-scheme: dark)').matches); const resolvedTheme=theme==='system'?(systemDark?'dark':'light'):theme;
-  const notify=msg=>{setToast(msg);window.clearTimeout(window.__toastTimer);window.__toastTimer=window.setTimeout(()=>setToast(''),3500)};
-  const loadData=async()=>{if(!hasLoadedOnce)setLoading(true);setError('');const results=await Promise.all([
-    supabase.from('properties').select('*').order('created_at'),supabase.from('rooms').select('*').order('room_number'),supabase.from('tenants').select('*').order('created_at',{ascending:false}),supabase.from('invoices').select('*').order('due_date',{ascending:false}),supabase.from('transactions').select('*').order('transaction_date',{ascending:false}).limit(200)
-  ]);const failed=results.find(r=>r.error);if(failed)setError(failed.error.message);else{setProperties(results[0].data||[]);setRooms(results[1].data||[]);setTenants(results[2].data||[]);setInvoices(results[3].data||[]);setTransactions(results[4].data||[])}setHasLoadedOnce(true);setLoading(false)};
-  useEffect(()=>{loadData()},[]); useEffect(()=>{const m=window.matchMedia('(prefers-color-scheme: dark)'),u=e=>setSystemDark(e.matches);m.addEventListener('change',u);return()=>m.removeEventListener('change',u)},[]); useEffect(()=>{document.documentElement.dataset.theme=resolvedTheme;localStorage.setItem('kos-theme',theme)},[theme,resolvedTheme]); useEffect(()=>{localStorage.setItem('selected-property',selectedPropertyId)},[selectedPropertyId]);
-  const scopedRooms=selectedPropertyId==='all'?rooms:rooms.filter(r=>r.property_id===selectedPropertyId); const roomIds=new Set(scopedRooms.map(r=>r.id)); const scopedTenants=selectedPropertyId==='all'?tenants:tenants.filter(t=>roomIds.has(t.room_id)); const tenantIds=new Set(scopedTenants.map(t=>t.id)); const scopedInvoices=selectedPropertyId==='all'?invoices:invoices.filter(i=>tenantIds.has(i.tenant_id)); const scopedTransactions=selectedPropertyId==='all'?transactions:transactions.filter(t=>t.property_id===selectedPropertyId);
-  const unpaid=scopedInvoices.filter(i=>i.status!=='paid'); const occupied=scopedRooms.filter(r=>r.status==='occupied').length; const monthKey=today().slice(0,7); const monthTx=scopedTransactions.filter(t=>String(t.transaction_date).slice(0,7)===monthKey); const income=monthTx.filter(t=>Number(t.amount)>0).reduce((a,t)=>a+Number(t.amount),0); const expense=Math.abs(monthTx.filter(t=>Number(t.amount)<0).reduce((a,t)=>a+Number(t.amount),0));
-  const nav=[[LayoutDashboard,'Dashboard'],[Building2,'Properti'],[Users,'Penghuni'],[CreditCard,'Penagihan'],[WalletCards,'Keuangan']]; const signOut=async()=>{const {error}=await supabase.auth.signOut();if(error)notify(error.message)};
-  const propertyName=selectedPropertyId==='all'?'Semua Properti':(properties.find(p=>p.id===selectedPropertyId)?.name||'Properti');
-  const title=section==='Dashboard'?['Selamat datang kembali',`${propertyName} · ringkasan operasional hari ini.`]:[section,'Kelola data properti dengan cepat dan rapi.'];
-  return <div className="app-shell"><aside className={mobileOpen?'sidebar open':'sidebar'}><div className="brand"><div className="brand-mark"><Building2 size={20}/></div><span>Kontrakin</span><button className="close-menu" onClick={()=>setMobileOpen(false)}><X/></button></div>
-    <div className="property-switcher"><label>Properti aktif</label><select value={selectedPropertyId} onChange={e=>setSelectedPropertyId(e.target.value)}><option value="all">Semua Properti</option>{properties.map(p=><option key={p.id} value={p.id}>{p.name}</option>)}</select></div>
-    <nav>{nav.map(([Icon,label])=><button key={label} className={section===label?'active':''} onClick={()=>{setSection(label);setMobileOpen(false)}}><Icon size={19}/><span>{label}</span>{label==='Penagihan'&&unpaid.length>0&&<em>{unpaid.length}</em>}</button>)}</nav>
-    <div className="sidebar-bottom"><button className={section==='Pengaturan'?'active':''} onClick={()=>setSection('Pengaturan')}><Settings size={19}/><span>Pengaturan</span></button><div className="help-card"><span>Data tersimpan di Supabase</span></div><div className="user"><div className="avatar dark">{initials(user.email)}</div><div className="user-info"><b>{user.email}</b><small>Admin Properti</small></div><button className="icon-button logout" onClick={signOut} title="Keluar"><LogOut size={17}/></button></div></div></aside>
-    <main className="main"><header className="topbar"><button className="menu-toggle" onClick={()=>setMobileOpen(v=>!v)}><Menu/></button><div className="topbar-property"><b>{propertyName}</b><small>{selectedPropertyId==='all'?'Gabungan seluruh properti':'Properti aktif'}</small></div><div className="topbar-actions"><button className="icon-button" onClick={loadData} title="Muat ulang"><RefreshCw size={17}/></button><button className="icon-button" onClick={()=>setTheme(t=>t==='system'?'light':t==='light'?'dark':'system')} title={`Tema: ${theme}`}><Sun size={17}/></button></div></header>
-    <div className="page-content"><div className="intro"><div><h1>{title[0]}</h1><p>{title[1]}</p></div></div>{error&&<div className="error-box">{error}</div>}{loading&&!hasLoadedOnce?<div className="panel loading">Memuat data dari Supabase...</div>:section==='Dashboard'?<Dashboard rooms={scopedRooms} unpaid={unpaid} occupied={occupied} income={income} expense={expense} tenants={scopedTenants} transactions={scopedTransactions}/>:section==='Properti'?<PropertyManager properties={properties} rooms={rooms} reload={loadData} notify={notify}/>:section==='Penghuni'?<TenantManager tenants={scopedTenants} rooms={scopedRooms} reload={loadData} notify={notify}/>:section==='Penagihan'?<InvoiceManager tenants={scopedTenants} rooms={scopedRooms} invoices={scopedInvoices} properties={properties.filter(p=>selectedPropertyId==='all'||p.id===selectedPropertyId)} reload={loadData} notify={notify}/>:section==='Keuangan'?<FinanceManager properties={properties} transactions={scopedTransactions} selectedPropertyId={selectedPropertyId} reload={loadData} notify={notify}/>:<SettingsManager user={user} properties={properties} reload={loadData} notify={notify} theme={theme} setTheme={setTheme} signOut={signOut}/>}</div>
-    </main><div className="mobile-nav">{nav.map(([Icon,label])=><button key={label} className={section===label?'active':''} onClick={()=>setSection(label)}><Icon size={20}/><span>{label}</span>{label==='Penagihan'&&unpaid.length>0&&<em>{unpaid.length}</em>}</button>)}<button className={section==='Pengaturan'?'active':''} onClick={()=>setSection('Pengaturan')}><Settings size={20}/><span>Pengaturan</span></button></div>{toast&&<div className="toast">{toast}</div>}</div>
-}
+  const [section, setSection] = useState('Dashboard');
+  const [mobileOpen, setMobileOpen] = useState(false);
+  const [toast, setToast] = useState('');
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
+  const [hasLoadedOnce, setHasLoadedOnce] = useState(false);
 
-function Dashboard({rooms,unpaid,occupied,income,expense,tenants,transactions}){
- const totalOutstanding=unpaid.reduce((s,i)=>s+(Number(i.amount||0)-Number(i.paid_amount||0)),0); const overdueItems=unpaid.filter(i=>overdueDays(i.due_date)>0); const overdueTotal=overdueItems.reduce((s,i)=>s+(Number(i.amount||0)-Number(i.paid_amount||0)),0); const notContacted=unpaid.filter(i=>i.collection_status!=='contacted'); const contacted=unpaid.filter(i=>i.collection_status==='contacted'); const notContactedTotal=notContacted.reduce((s,i)=>s+(Number(i.amount||0)-Number(i.paid_amount||0)),0); const contactedTotal=contacted.reduce((s,i)=>s+(Number(i.amount||0)-Number(i.paid_amount||0)),0);
- return <><section className="stats-grid"><article className="stat-card"><div className="stat-icon"><WalletCards/></div><p>Pemasukan bulan ini</p><h2>{rupiah(income)}</h2></article><article className="stat-card"><div className="stat-icon"><CircleDollarSign/></div><p>Pengeluaran bulan ini</p><h2>{rupiah(expense)}</h2></article><article className="stat-card"><div className="stat-icon"><Home/></div><p>Okupansi kamar</p><h2>{occupied}<small>/ {rooms.length} kamar</small></h2><div className="bar"><span style={{width:`${rooms.length?occupied/rooms.length*100:0}%`}}/></div></article><article className="stat-card"><div className="stat-icon"><FileText/></div><p>Total tunggakan</p><h2>{rupiah(totalOutstanding)}</h2><span className="muted">{unpaid.length} periode belum lunas</span><span className="stat-alert">Terlambat {rupiah(overdueTotal)}</span></article></section><section className="content-grid"><div className="panel room-panel"><div className="panel-heading"><div><h3>Status kamar</h3><p>Data aktif</p></div></div>{rooms.length===0?<div className="empty">Belum ada kamar.</div>:rooms.map(r=><div className="db-room" key={r.id}><div><b>Kamar {r.room_number}</b><span>{r.status==='occupied'?(tenants.find(t=>t.room_id===r.id)?.full_name||'Terisi'):r.status==='maintenance'?'Perawatan':'Tersedia'}</span></div><strong>{rupiah(r.monthly_rate)}</strong><span className={`status ${r.status}`}>{r.status==='occupied'?'Terisi':r.status==='maintenance'?'Perawatan':'Kosong'}</span></div>)}</div><div className="panel payment-panel"><div className="panel-heading"><div><h3>Penagihan</h3><p>{notContacted.length} periode perlu ditagih · {contacted.length} sudah ditagih</p></div><span className="count">{unpaid.length}</span></div><div className="dashboard-collection-summary"><div><span>Perlu ditagih</span><b>{rupiah(notContactedTotal)}</b></div><div><span>Sudah ditagih</span><b>{rupiah(contactedTotal)}</b></div><div><span>Terlambat</span><b>{rupiah(overdueTotal)}</b></div></div>{unpaid.slice(0,6).map(i=>{const t=tenants.find(x=>x.id===i.tenant_id);const r=rooms.find(x=>x.id===i.room_id);const remain=Number(i.amount||0)-Number(i.paid_amount||0);return <div className="payment" key={i.id}><div className="avatar">{initials(t?.full_name)}</div><div className="payment-info"><b>{t?.full_name||'Penghuni'}</b><span>Kamar {r?.room_number||'-'} · Sisa {rupiah(remain)} · {i.collection_status==='contacted'?'Sudah ditagih':overdueDays(i.due_date)>0?`Terlambat ${overdueDays(i.due_date)} hari`:'Belum ditagih'}</span></div></div>})}{unpaid.length===0&&<div className="empty">Tidak ada tagihan aktif.</div>}</div></section><section className="panel transaction-panel"><div className="panel-heading"><div><h3>Transaksi terbaru</h3></div></div>{transactions.length===0?<div className="empty">Belum ada transaksi.</div>:<div className="transaction-list">{transactions.slice(0,10).map(t=><div className="transaction" key={t.id}><div className={`transaction-icon ${Number(t.amount)>0?'income':'expense'}`}><WalletCards size={19}/></div><div><b>{t.description}</b><span>{t.category} · {t.transaction_date}</span></div><strong className={Number(t.amount)>0?'income':'expense'}>{Number(t.amount)>0?'+':'−'}{rupiah(Math.abs(Number(t.amount)))}</strong></div>)}</div>}</section></>;
-}
+  // Core Database Collections
+  const [properties, setProperties] = useState([]);
+  const [rooms, setRooms] = useState([]);
+  const [tenants, setTenants] = useState([]);
+  const [invoices, setInvoices] = useState([]);
+  const [transactions, setTransactions] = useState([]);
 
-function PropertyManager({properties,rooms,reload,notify}){
- const [selected,setSelected]=useState(properties[0]?.id||''); const p=properties.find(x=>x.id===selected)||properties[0]; const [mode,setMode]=useState('list'); const [form,setForm]=useState({name:'',address:'',bca:'0571288191',dana:'08816585970',gopay:'085161174317',payment_name:'Ryan Putra Pratama'}); const [room,setRoom]=useState({room_number:'',monthly_rate:''}); const [busy,setBusy]=useState(false);
- useEffect(()=>{if(!selected&&properties[0])setSelected(properties[0].id); if(p)setForm({name:p.name||'',address:p.address||'',bca:p.payment_bca||'0571288191',dana:p.payment_dana||'08816585970',gopay:p.payment_gopay||'085161174317',payment_name:p.payment_name||'Ryan Putra Pratama'})},[p?.id,properties.length]);
- const saveProperty=async e=>{e.preventDefault();setBusy(true);const payload={name:form.name.trim()||'Kos Baru',address:form.address.trim()||null,payment_bca:form.bca.trim()||null,payment_dana:form.dana.trim()||null,payment_gopay:form.gopay.trim()||null,payment_name:form.payment_name.trim()||null};const res=p?await supabase.from('properties').update(payload).eq('id',p.id):await supabase.from('properties').insert(payload);setBusy(false);if(res.error)return notify(res.error.message);setMode('list');notify('Properti tersimpan.');reload()};
- const deleteProperty=async()=>{if(!p)return;if(!confirm(`Hapus ${p.name}? Semua kamar, penghuni, tagihan dan transaksi terkait dapat ikut terhapus.`))return;const {error}=await supabase.from('properties').delete().eq('id',p.id);if(error)return notify(error.message);setSelected('');notify('Properti dihapus.');reload()};
- const addRoom=async e=>{e.preventDefault();if(!p)return notify('Pilih properti.');const amount=parseMoneyInput(room.monthly_rate);if(!room.room_number||!amount)return notify('Lengkapi nomor dan tarif kamar.');setBusy(true);const {error}=await supabase.from('rooms').insert({property_id:p.id,room_number:room.room_number.trim(),monthly_rate:amount,status:'vacant'});setBusy(false);if(error)return notify(error.message);setRoom({room_number:'',monthly_rate:''});notify('Kamar ditambahkan.');reload()};
- const deleteRoom=async r=>{if(!confirm(`Hapus kamar ${r.room_number}?`))return;const {error}=await supabase.from('rooms').delete().eq('id',r.id);if(error)return notify(error.message);notify('Kamar dihapus.');reload()};
- return <section className="property-manager-v2"><div className="property-list-panel"><div className="module-toolbar"><div><h2>Properti</h2><p>Kelola banyak tempat kos dari satu akun.</p></div><button className="add-button" onClick={()=>{setSelected('');setForm({name:'',address:'',bca:'0571288191',dana:'08816585970',gopay:'085161174317',payment_name:'Ryan Putra Pratama'});setMode('edit')}}><Plus size={17}/> Tambah Properti</button></div>{properties.length===0?<div className="empty panel">Belum ada properti.</div>:<div className="property-cards">{properties.map(x=>{const rs=rooms.filter(r=>r.property_id===x.id);const occ=rs.filter(r=>r.status==='occupied').length;return <button className={`property-card ${p?.id===x.id?'selected':''}`} key={x.id} onClick={()=>{setSelected(x.id);setMode('list')}}><Building2 size={20}/><div><b>{x.name}</b><span>{x.address||'Alamat belum diisi'}</span><small>{rs.length} kamar · {occ} terisi · {rs.length-occ} kosong</small></div></button>})}</div>}</div>{mode==='edit'&&<form className="edit-card" onSubmit={saveProperty}><h3>{p?'Edit properti':'Properti baru'}</h3><label>Nama properti<input value={form.name} onChange={e=>setForm(f=>({...f,name:e.target.value}))} placeholder="Kos Cendana" required/></label><label>Alamat<input value={form.address} onChange={e=>setForm(f=>({...f,address:e.target.value}))} placeholder="Alamat lengkap"/></label><h4>Metode pembayaran yang muncul di WA</h4><label>Nama penerima<input value={form.payment_name} onChange={e=>setForm(f=>({...f,payment_name:e.target.value}))}/></label><label>BCA<input value={form.bca} onChange={e=>setForm(f=>({...f,bca:e.target.value}))}/></label><label>DANA<input value={form.dana} onChange={e=>setForm(f=>({...f,dana:e.target.value}))}/></label><label>GoPay / ShopeePay<input value={form.gopay} onChange={e=>setForm(f=>({...f,gopay:e.target.value}))}/></label><div className="form-actions"><button className="primary" disabled={busy}><Save size={15}/> Simpan</button><button type="button" onClick={()=>setMode('list')}>Batal</button>{p&&<button type="button" className="danger-outline-btn" onClick={deleteProperty}>Hapus Properti</button>}</div></form>}{p&&mode==='list'&&<div className="property-detail"><div className="property-detail-head"><div><h2>{p.name}</h2><p>{p.address||'Alamat belum diisi'}</p></div><div className="toolbar-actions"><button className="secondary-button" onClick={()=>setMode('edit')}><Pencil size={15}/> Edit</button></div></div><div className="payment-methods"><h3>Pembayaran</h3><span>BCA · {p.payment_bca||'—'}</span><span>DANA · {p.payment_dana||'—'}</span><span>GoPay / ShopeePay · {p.payment_gopay||'—'}</span><small>a.n. {p.payment_name||'—'}</small></div><div className="property-room-head"><h3>Kamar</h3><span>{rooms.filter(r=>r.property_id===p.id).length} kamar</span></div><form className="room-inline-form" onSubmit={addRoom}><input value={room.room_number} onChange={e=>setRoom(r=>({...r,room_number:e.target.value}))} placeholder="Nomor kamar"/><MoneyInput value={room.monthly_rate} onChange={v=>setRoom(r=>({...r,monthly_rate:v}))} placeholder="500,000" required/><button className="add-button" disabled={busy}><Plus size={15}/> Tambah kamar</button></form><div className="room-list">{rooms.filter(r=>r.property_id===p.id).map(r=><article className="room-row" key={r.id}><div className={`room-row-icon ${r.status}`}><Home size={18}/></div><div><b>Kamar {r.room_number}</b><span>{r.status==='occupied'?'Terisi':r.status==='maintenance'?'Perawatan':'Kosong'}</span></div><strong>{rupiah(r.monthly_rate)}<small>/bulan</small></strong><button className="danger-icon" onClick={()=>deleteRoom(r)}><Trash2 size={15}/></button></article>)}</div></div>}</section>
-}
+  // Property Switcher State
+  const [selectedPropertyId, setSelectedPropertyId] = useState(
+    () => localStorage.getItem('selected-property') || 'all'
+  );
 
-function TenantManager({tenants,rooms,reload,notify}){
-  const [open,setOpen]=useState(false); const [editing,setEditing]=useState(null);
-  const blank={full_name:'',email:'',whatsapp_number:'',id_card_number:'',lease_start:today(),lease_end:'',room_id:'',billing_day:''};
-  const [form,setForm]=useState(blank); const [busy,setBusy]=useState(false);
-  const set=(k,v)=>setForm(f=>({...f,[k]:v}));
-  const startEdit=t=>{setEditing(t);setForm({full_name:t.full_name,email:t.email||'',whatsapp_number:t.whatsapp_number,id_card_number:t.id_card_number||'',lease_start:t.lease_start,lease_end:t.lease_end||'',room_id:t.room_id||'',billing_day:String(t.billing_day||parseDateLocal(t.lease_start).getDate())});setOpen(true)};
-  const save=async e=>{
-    e.preventDefault(); if(!form.full_name||!form.whatsapp_number||!form.lease_start)return;
-    const newDay=Math.max(1,Math.min(31,Number(form.billing_day)||parseDateLocal(form.lease_start).getDate()));
-    setBusy(true); let error=null;
-    const payload={full_name:form.full_name,email:form.email||null,whatsapp_number:form.whatsapp_number,id_card_number:form.id_card_number||null,lease_start:form.lease_start,lease_end:form.lease_end||null,room_id:form.room_id||null,billing_day:newDay};
-    if(editing){
-      const oldDay=Number(editing.billing_day||parseDateLocal(editing.lease_start).getDate());
-      const result=await supabase.from('tenants').update(payload).eq('id',editing.id); error=result.error;
-      if(!error && oldDay!==newDay){
-        const room=rooms.find(r=>r.id===form.room_id||r.id===editing.room_id); const rate=Number(room?.monthly_rate||0);
-        const shift=newDay-oldDay; const adjustment=roundDownTo1k(Math.abs(rate*shift/30))*(shift>=0?1:-1);
-        if(adjustment!==0){
-          const propertyId=room?.property_id;
-          const adjustmentRow={tenant_id:editing.id,room_id:room.id,old_billing_day:oldDay,new_billing_day:newDay,shift_days:shift,amount:adjustment,effective_date:today(),description:`Perubahan tanggal tagihan ${oldDay} → ${newDay}`};
-          const adjRes=await supabase.from('billing_adjustments').insert(adjustmentRow);
-          if(adjRes.error && !String(adjRes.error.message||'').toLowerCase().includes('billing_adjustments')) console.warn('Billing adjustment:',adjRes.error.message);
-          if(propertyId){
-            const tx={property_id:propertyId,category:'Penyesuaian Prorata',description:`Penyesuaian perubahan tanggal tagihan ${oldDay} → ${newDay} · ${form.full_name}`,amount:adjustment,transaction_date:today()};
-            const txRes=await supabase.from('transactions').insert(tx);
-            if(txRes.error) console.warn('Prorata adjustment:',txRes.error.message);
-          }
-        }
+  // App Theme Style
+  const [theme, setTheme] = useState(() => localStorage.getItem('kos-theme') || 'system');
+  const [systemDark, setSystemDark] = useState(() => window.matchMedia('(prefers-color-scheme: dark)').matches);
+  const resolvedTheme = theme === 'system' ? (systemDark ? 'dark' : 'light') : theme;
+
+  const notify = msg => {
+    setToast(msg);
+    window.clearTimeout(window.__toastTimer);
+    window.__toastTimer = window.setTimeout(() => setToast(''), 3500);
+  };
+
+  const loadData = async () => {
+    if (!hasLoadedOnce) setLoading(true);
+    setError('');
+
+    try {
+      const [pRes, rRes, tRes, iRes, txRes] = await Promise.all([
+        supabase.from('properties').select('*').order('created_at'),
+        supabase.from('rooms').select('*').order('room_number'),
+        supabase.from('tenants').select('*').order('created_at', { ascending: false }),
+        supabase.from('invoices').select('*').order('due_date', { ascending: false }),
+        supabase.from('transactions').select('*').order('transaction_date', { ascending: false }).limit(300)
+      ]);
+
+      const failed = [pRes, rRes, tRes, iRes, txRes].find(r => r.error);
+      if (failed) {
+        setError(failed.error.message);
+      } else {
+        setProperties(pRes.data || []);
+        setRooms(rRes.data || []);
+        setTenants(tRes.data || []);
+        setInvoices(iRes.data || []);
+        setTransactions(txRes.data || []);
       }
-    } else { const r=await supabase.from('tenants').insert(payload).select().single(); error=r.error; }
-    if(!error&&form.room_id)await supabase.from('rooms').update({status:'occupied'}).eq('id',form.room_id);
-    if(!error&&editing&&editing.room_id&&editing.room_id!==form.room_id)await supabase.from('rooms').update({status:'vacant',maintenance_notes:null}).eq('id',editing.room_id);
-    setBusy(false); if(error)return notify(error.message); setOpen(false);setEditing(null);setForm(blank);notify(editing?'Penghuni diperbarui.':'Penghuni ditambahkan.');reload();
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setHasLoadedOnce(true);
+      setLoading(false);
+    }
   };
-  const del=async t=>{if(!confirm(`Hapus penghuni ${t.full_name}?`))return;const {error}=await supabase.from('tenants').delete().eq('id',t.id);if(error)return notify(error.message);if(t.room_id)await supabase.from('rooms').update({status:'vacant'}).eq('id',t.room_id);notify('Penghuni dihapus.');reload()};
-  const freeRooms=rooms.filter(r=>r.status==='vacant'||form.room_id===r.id);
-  return <section className="module-full"><div className="module-toolbar"><div><h2>Penghuni</h2><p>Kelola penghuni, tanggal tagihan, dan kamar yang ditempati.</p></div><button className="add-button" onClick={()=>{setEditing(null);setForm(blank);setOpen(true)}}><UserPlus size={17}/> Tambah penghuni</button></div>
-  {open&&<form className="edit-card tenant-form" onSubmit={save}><h3>{editing?'Edit penghuni':'Tambah penghuni'}</h3><div className="form-grid"><label>Nama lengkap<input value={form.full_name} onChange={e=>set('full_name',e.target.value)} required/></label><label>No. WhatsApp<input value={form.whatsapp_number} onChange={e=>set('whatsapp_number',e.target.value)} placeholder="62812..." required/></label><label>Email<input type="email" value={form.email} onChange={e=>set('email',e.target.value)} placeholder="nama@email.com"/></label><label>No. KTP<input value={form.id_card_number} onChange={e=>set('id_card_number',e.target.value)}/></label><label>Kamar<select value={form.room_id} onChange={e=>set('room_id',e.target.value)}><option value="">Belum ditempatkan</option>{freeRooms.map(r=><option key={r.id} value={r.id}>Kamar {r.room_number}</option>)}</select></label><label>Tanggal masuk<input type="date" value={form.lease_start} onChange={e=>set('lease_start',e.target.value)} required/></label>{editing&&<label>Pindah tanggal tagihan ke<input type="number" min="1" max="31" value={form.billing_day} onChange={e=>set('billing_day',e.target.value)} placeholder={String(parseDateLocal(form.lease_start).getDate())}/><small className="form-hint">Hanya untuk perubahan tanggal. Sistem mencatat prorata satu kali dan periode berikutnya kembali tarif penuh.</small></label>}<label>Tanggal keluar<input type="date" value={form.lease_end} onChange={e=>set('lease_end',e.target.value)}/></label></div><div className="form-actions"><button className="primary" disabled={busy}><Save size={15}/> Simpan</button><button type="button" onClick={()=>setOpen(false)}>Batal</button></div></form>}
-  {tenants.length===0?<div className="panel empty">Belum ada penghuni.</div>:<div className="data-table panel"><div className="table-head"><span>Penghuni</span><span>Kamar</span><span>Tanggal tagihan</span><span>Aksi</span></div>{tenants.map(t=>{const r=rooms.find(x=>x.id===t.room_id);return <div className="table-row" key={t.id}><div><b>{t.full_name}</b><small>{t.whatsapp_number}{t.email?` · ${t.email}`:''}</small></div><span>{r?`Kamar ${r.room_number}`:'Belum ditempatkan'}</span><span>Tanggal {t.billing_day||parseDateLocal(t.lease_start).getDate()} setiap bulan</span><div className="row-actions"><button onClick={()=>startEdit(t)} title="Edit"><Pencil size={15}/></button><button className="danger" onClick={()=>del(t)} title="Hapus"><Trash2 size={15}/></button></div></div>})}</div>}</section>}
 
-function InvoiceManager({tenants,rooms,invoices,properties,reload,notify}){
- const [open,setOpen]=useState(false),[editing,setEditing]=useState(null),[busy,setBusy]=useState(false),[messageOpen,setMessageOpen]=useState(false),[messageType,setMessageType]=useState('reminder'),[message,setMessage]=useState(''),[selectedGroup,setSelectedGroup]=useState(null),[paymentOpen,setPaymentOpen]=useState(false),[paymentAmount,setPaymentAmount]=useState(''),[showContacted,setShowContacted]=useState(false); const [form,setForm]=useState({tenant_id:'',due_date:today(),amount:'',manualAmount:false,monthCount:1}); const set=(k,v)=>setForm(f=>({...f,[k]:v})); const roomFor=t=>rooms.find(r=>r.id===t?.room_id); const remain=i=>Math.max(0,Number(i.amount||0)-Number(i.paid_amount||0)); const overdueDaysLocal=d=>Math.max(0,Math.floor((parseDateLocal(today())-parseDateLocal(d))/86400000));
- const autoAmount=t=>Number(roomFor(t)?.monthly_rate||0);
- const syncAutomaticInvoices=async()=>{const rows=[];for(const t of tenants.filter(t=>t.room_id&&t.lease_start)){const r=roomFor(t);if(!r)continue;const start=parseDateLocal(t.lease_start),end=t.lease_end?parseDateLocal(t.lease_end):null;let cursor=new Date(start.getFullYear(),start.getMonth(),1);for(let n=0;n<120;n++){const due=monthDueDate(cursor.getFullYear(),cursor.getMonth(),billingDayForTenant(t));const d=parseDateLocal(due);if(d>parseDateLocal(today()))break;if(!end||d<=end)rows.push({tenant_id:t.id,room_id:r.id,due_date:due,amount:Number(r.monthly_rate||0),status:'unpaid',paid_amount:0});cursor=new Date(cursor.getFullYear(),cursor.getMonth()+1,1)}}if(rows.length){const {error}=await supabase.from('invoices').upsert(rows,{onConflict:'tenant_id,due_date',ignoreDuplicates:true});if(error)console.warn(error.message)}await supabase.from('invoices').update({status:'overdue'}).eq('status','unpaid').lt('due_date',today());reload()};
- useEffect(()=>{if(tenants.length&&rooms.length)syncAutomaticInvoices()},[tenants.length,rooms.length]);
- const save=async e=>{e.preventDefault();const t=tenants.find(x=>x.id===form.tenant_id),r=roomFor(t);if(!t||!r)return notify('Pilih penghuni yang punya kamar.');const count=Math.max(1,Math.min(24,Number(form.monthCount)||1)),rows=[];for(let n=0;n<count;n++){const due=addMonthsDate(form.due_date,n),amount=form.manualAmount?parseMoneyInput(form.amount):autoAmount(t);rows.push({tenant_id:t.id,room_id:r.id,due_date:due,amount,status:'unpaid',paid_amount:0})}setBusy(true);const result=editing?await supabase.from('invoices').update({due_date:form.due_date,amount:form.manualAmount?parseMoneyInput(form.amount):autoAmount(t)}).eq('id',editing.id):await supabase.from('invoices').upsert(rows,{onConflict:'tenant_id,due_date',ignoreDuplicates:true});setBusy(false);if(result.error)return notify(result.error.message);setOpen(false);setEditing(null);notify(editing?'Tagihan diperbarui.':`${count} periode diproses.`);reload()};
- const groups=Object.values(invoices.reduce((a,i)=>{const k=i.tenant_id+'::'+i.room_id;(a[k]??={tenant:tenants.find(t=>t.id===i.tenant_id),room:rooms.find(r=>r.id===i.room_id),items:[]}).items.push(i);return a},{}));
- const openPayment=g=>{const total=g.items.filter(i=>i.status!=='paid').reduce((s,i)=>s+remain(i),0);setSelectedGroup(g);setPaymentAmount(String(total));setPaymentOpen(true)};
- const recordPayment=async e=>{e.preventDefault();const g=selectedGroup,amount=parseMoneyInput(paymentAmount);if(!g||amount<=0)return notify('Masukkan nominal pembayaran.');let left=amount;const now=new Date().toISOString();setBusy(true);for(const i of [...g.items].filter(i=>i.status!=='paid').sort((a,b)=>String(a.due_date).localeCompare(String(b.due_date)))){if(left<=0)break;const outstanding=remain(i);const applied=Math.min(left,outstanding);if(applied<=0)continue;const newPaid=Number(i.paid_amount||0)+applied;const newStatus=newPaid>=Number(i.amount||0)?'paid':(overdueDaysLocal(i.due_date)>0?'overdue':'unpaid');const {error}=await supabase.from('invoices').update({paid_amount:newPaid,status:newStatus,paid_at:newStatus==='paid'?now:null}).eq('id',i.id);if(error){setBusy(false);return notify(error.message)}const property=properties.find(p=>p.id===g.room?.property_id)||properties[0]; const tx={property_id:property?.id,invoice_id:i.id,category:'Sewa Kamar',description:`Pembayaran ${g.tenant?.full_name||'penghuni'} · Kamar ${g.room?.room_number||'-'}`,amount:applied,transaction_date:today()};const {error:txError}=await supabase.from('transactions').insert(tx);if(txError){setBusy(false);return notify(txError.message)}left-=applied}setBusy(false);setPaymentOpen(false);setPaymentAmount('');reload();notify(left>0?`Pembayaran dicatat. Kelebihan ${rupiah(left)} tidak dimasukkan.`:'Pembayaran dicatat dan saldo tagihan diperbarui.');setMessageType('paid');setMessage(buildPaidMessage(g,amount-left));setMessageOpen(true)};
- const paymentText=(group)=>{const p=properties.find(x=>x.id===group?.room?.property_id)||properties[0];return [p?.payment_bca&&`BCA: ${p.payment_bca}`,p?.payment_dana&&`DANA: ${p.payment_dana}`,p?.payment_gopay&&`GoPay / ShopeePay: ${p.payment_gopay}`,p?.payment_name&&`a.n. ${p.payment_name}`].filter(Boolean).join('\n')||'BCA: 0571288191\nDANA: 08816585970\nGoPay / ShopeePay: 085161174317\na.n. Ryan Putra Pratama';};
- const buildMessage=(g,type)=>{const u=g.items.filter(i=>i.status!=='paid').sort((a,b)=>String(a.due_date).localeCompare(String(b.due_date)));const lines=u.map(i=>`• ${new Intl.DateTimeFormat('id-ID',{month:'long',year:'numeric'}).format(parseDateLocal(i.due_date))} — ${rupiah(remain(i))}${overdueDaysLocal(i.due_date)>0?` — Terlambat ${overdueDaysLocal(i.due_date)} hari`:''}`).join('\n');const total=u.reduce((s,i)=>s+remain(i),0);return `🏠 ${(properties.find(p=>p.id===g.room?.property_id)||properties[0])?.name||'Kos'}\n\nPENAGIHAN SEWA KAMAR\n\nPenghuni: ${g.tenant?.full_name||''}\nKamar: ${g.room?.room_number||''}\n\nRINCIAN TAGIHAN:\n${lines}\n\nJUMLAH PERIODE: ${u.length} bulan\nTOTAL TAGIHAN: ${rupiah(total)}\n\nPEMBAYARAN:\n${paymentText(g)}\n\nMohon melakukan pembayaran. Terima kasih 🙏`};
- const buildPaidMessage=(g,paid)=>{const remaining=g.items.filter(i=>i.status!=='paid').reduce((s,i)=>s+remain(i),0);return `🏠 ${(properties.find(p=>p.id===g.room?.property_id)||properties[0])?.name||'Kos'}\n\nKONFIRMASI PEMBAYARAN\n\nPenghuni: ${g.tenant?.full_name||''}\nKamar: ${g.room?.room_number||''}\n\nTOTAL DIBAYAR: ${rupiah(paid)}\nSTATUS: ${remaining>0?'PEMBAYARAN DITERIMA':'LUNAS ✓'}\nSISA TAGIHAN: ${rupiah(remaining)}\n${remaining>0?`SISA PERIODE: ${g.items.filter(i=>i.status!=='paid').length} bulan`:''}\n\nTerima kasih 🙏`};
- const openMessage=g=>{setSelectedGroup(g);setMessageType('reminder');setMessage(buildMessage(g,'reminder'));setMessageOpen(true)}; const sendMessage=async()=>{const t=selectedGroup?.tenant;if(!t?.whatsapp_number)return notify('Nomor WhatsApp belum tersedia.');window.open(`https://wa.me/${t.whatsapp_number.replace(/\D/g,'')}?text=${encodeURIComponent(message)}`,'_blank','noopener,noreferrer');if(messageType!=='paid'){const ids=selectedGroup.items.filter(i=>i.status!=='paid'&&i.collection_status!=='contacted').map(i=>i.id);if(ids.length){await supabase.from('invoices').update({collection_status:'contacted',last_contacted_at:new Date().toISOString()}).in('id',ids);reload()}}setMessageOpen(false)};
- const unpaid=groups.flatMap(g=>g.items.filter(i=>i.status!=='paid'));const uncontacted=unpaid.filter(i=>i.collection_status!=='contacted'),contacted=unpaid.filter(i=>i.collection_status==='contacted'),overdue=unpaid.filter(i=>overdueDaysLocal(i.due_date)>0);const total=unpaid.reduce((s,i)=>s+remain(i),0),contactedTotal=contacted.reduce((s,i)=>s+remain(i),0),overdueTotal=overdue.reduce((s,i)=>s+remain(i),0);const displayed=groups.filter(g=>g.items.some(i=>i.status!=='paid'&&(showContacted?i.collection_status==='contacted':i.collection_status!=='contacted'))).sort((a,b)=>Math.max(...a.items.filter(i=>i.status!=='paid').map(i=>overdueDaysLocal(i.due_date)),0)-Math.max(...b.items.filter(i=>i.status!=='paid').map(i=>overdueDaysLocal(i.due_date)),0)).reverse(); const edit=i=>{setEditing(i);setForm({tenant_id:i.tenant_id,due_date:i.due_date,amount:String(i.amount),manualAmount:true,monthCount:1});setOpen(true)};
- return <section className="module-full"><div className="module-toolbar"><div><h2>Penagihan</h2><p>Per kamar, per periode, dengan pembayaran sebagian.</p></div><div className="toolbar-actions"><button className="add-button" onClick={()=>{setEditing(null);setForm({tenant_id:'',due_date:today(),amount:'',manualAmount:false,monthCount:1});setOpen(true)}}><ReceiptText size={17}/> Buat tagihan</button></div></div><div className="billing-summary"><div><small>Total tunggakan</small><b>{rupiah(total)}</b></div><div><small>Perlu ditagih</small><b>{rupiah(uncontacted.reduce((s,i)=>s+remain(i),0))}</b></div><div><small>Sudah ditagih</small><b>{rupiah(contactedTotal)}</b></div><div><small>Nilai terlambat</small><b>{rupiah(overdueTotal)}</b></div></div><div className="billing-filter"><button className={!showContacted?'active':''} onClick={()=>setShowContacted(false)}>Perlu ditagih</button><button className={showContacted?'active':''} onClick={()=>setShowContacted(true)}>Sudah ditagih</button></div>{open&&<form className="edit-card" onSubmit={save}><h3>{editing?'Edit tagihan':'Tagihan baru'}</h3><div className="form-grid"><label>Penghuni<select value={form.tenant_id} onChange={e=>{const t=tenants.find(x=>x.id===e.target.value);set('tenant_id',e.target.value);if(t&&!form.manualAmount)set('amount',String(autoAmount(t)))}} required><option value="">Pilih penghuni</option>{tenants.filter(t=>t.room_id).map(t=><option key={t.id} value={t.id}>{t.full_name} · Kamar {rooms.find(r=>r.id===t.room_id)?.room_number||'-'}</option>)}</select></label><label>Periode mulai<input type="date" value={form.due_date} onChange={e=>set('due_date',e.target.value)} required/></label>{!editing&&<label>Jumlah bulan/periode<input type="number" min="1" max="24" value={form.monthCount} onChange={e=>set('monthCount',e.target.value)} required/></label>}<label>Nominal tagihan<MoneyInput value={form.amount} onChange={v=>set('amount',v)} required/></label></div><p className="form-hint">Tagihan bulanan normal selalu memakai tarif kamar penuh. Jika tanggal tagihan berubah, lakukan penyesuaian prorata dari menu Penghuni.</p><div className="form-actions"><button className="primary" disabled={busy}><Save size={15}/> Simpan</button><button type="button" onClick={()=>setOpen(false)}>Batal</button></div></form>}{displayed.length===0?<div className="empty panel">Tidak ada tagihan pada daftar ini.</div>:<div className="billing-room-list">{displayed.map(g=>{const active=g.items.filter(i=>i.status!=='paid');const sum=active.reduce((s,i)=>s+remain(i),0);const late=active.some(i=>overdueDaysLocal(i.due_date)>0);return <div className={`billing-room-card ${late?'is-overdue':'is-pending'}`} key={g.tenant?.id+'-'+g.room?.id}><div className="billing-room-head"><div><b>Kamar {g.room?.room_number||'-'} · {g.tenant?.full_name||'Penghuni'}</b><small>{active.length} bulan belum lunas · {late?'Ada yang terlambat':'Belum jatuh tempo'}</small></div><strong>{rupiah(sum)}</strong></div><div className="billing-details">{active.sort((a,b)=>String(a.due_date).localeCompare(String(b.due_date))).map(i=><div className="billing-detail" key={i.id}><span>{new Intl.DateTimeFormat('id-ID',{month:'long',year:'numeric'}).format(parseDateLocal(i.due_date))}</span><b>{rupiah(remain(i))}</b><small>{Number(i.paid_amount||0)>0?`Sudah dibayar ${rupiah(i.paid_amount)}`:i.collection_status==='contacted'?'Sudah ditagih':overdueDaysLocal(i.due_date)>0?`Terlambat ${overdueDaysLocal(i.due_date)} hari`:'Belum ditagih'}</small><button type="button" onClick={()=>edit(i)}><Pencil size={14}/></button></div>)}</div><div className="billing-room-actions"><button className="primary" onClick={()=>openMessage(g)}> <MessageCircle size={15}/> {active.every(i=>i.collection_status==='contacted')?'Kirim ulang WA':'WA Penagihan'}</button><button className="secondary-button" onClick={()=>openPayment(g)}><CheckCircle2 size={15}/> Catat pembayaran</button></div></div>})}</div>}{paymentOpen&&<div className="modal-backdrop"><form className="modal" onSubmit={recordPayment}><button type="button" className="modal-close" onClick={()=>setPaymentOpen(false)}><X/></button><h3>Catat pembayaran</h3><p>{selectedGroup?.tenant?.full_name} · Kamar {selectedGroup?.room?.room_number}</p><label>Nominal dibayar<MoneyInput value={paymentAmount} onChange={setPaymentAmount} required/></label><small className="form-hint">Pembayaran akan otomatis dialokasikan ke periode tertua terlebih dahulu.</small><div className="form-actions"><button className="primary" disabled={busy}><CheckCircle2 size={15}/> Simpan pembayaran</button><button type="button" onClick={()=>setPaymentOpen(false)}>Batal</button></div></form></div>}{messageOpen&&<div className="modal-backdrop"><div className="modal"><button type="button" className="modal-close" onClick={()=>setMessageOpen(false)}><X/></button><h3>{messageType==='paid'?'Konfirmasi pembayaran':'Pesan penagihan WhatsApp'}</h3><textarea value={message} onChange={e=>setMessage(e.target.value)} rows="16"/><div className="form-actions"><button className="primary" onClick={sendMessage}><MessageCircle size={15}/> Buka WhatsApp</button><button type="button" onClick={()=>setMessageOpen(false)}>Batal</button></div></div></div>}</section>;
+  // On mount and theme listener
+  useEffect(() => {
+    loadData();
+  }, []);
+
+  useEffect(() => {
+    const media = window.matchMedia('(prefers-color-scheme: dark)');
+    const handleSystemDarkChange = e => setSystemDark(e.matches);
+    media.addEventListener('change', handleSystemDarkChange);
+    return () => media.removeEventListener('change', handleSystemDarkChange);
+  }, []);
+
+  useEffect(() => {
+    document.documentElement.dataset.theme = resolvedTheme;
+    localStorage.setItem('kos-theme', theme);
+  }, [theme, resolvedTheme]);
+
+  useEffect(() => {
+    localStorage.setItem('selected-property', selectedPropertyId);
+  }, [selectedPropertyId]);
+
+  // ISOLASI DATA MULTI-PROPERTI (Sangat Ketat)
+  const scopedRooms = useMemo(() => {
+    if (selectedPropertyId === 'all') return rooms;
+    return rooms.filter(r => r.property_id === selectedPropertyId);
+  }, [rooms, selectedPropertyId]);
+
+  const scopedRoomIds = useMemo(() => new Set(scopedRooms.map(r => r.id)), [scopedRooms]);
+
+  const scopedTenants = useMemo(() => {
+    if (selectedPropertyId === 'all') return tenants;
+    // Tenants belong to a room, and the room belongs to the active property
+    return tenants.filter(t => scopedRoomIds.has(t.room_id));
+  }, [tenants, scopedRoomIds, selectedPropertyId]);
+
+  const scopedTenantIds = useMemo(() => new Set(scopedTenants.map(t => t.id)), [scopedTenants]);
+
+  const scopedInvoices = useMemo(() => {
+    if (selectedPropertyId === 'all') return invoices;
+    // Invoices belong to a tenant of the active property
+    return invoices.filter(i => scopedTenantIds.has(i.tenant_id));
+  }, [invoices, scopedTenantIds, selectedPropertyId]);
+
+  const scopedTransactions = useMemo(() => {
+    if (selectedPropertyId === 'all') return transactions;
+    // Transactions belong directly to the active property
+    return transactions.filter(t => t.property_id === selectedPropertyId);
+  }, [transactions, selectedPropertyId]);
+
+  // Unpaid invoices count for sidebar indicator badge
+  const unpaidInvoicesCount = useMemo(() => {
+    return scopedInvoices.filter(i => i.status !== 'paid').length;
+  }, [scopedInvoices]);
+
+  const activePropertyName = selectedPropertyId === 'all'
+    ? 'Semua Properti'
+    : (properties.find(p => p.id === selectedPropertyId)?.name || 'Properti');
+
+  const signOut = async () => {
+    const { error } = await supabase.auth.signOut();
+    if (error) notify(error.message);
+  };
+
+  const menuItems = [
+    [LayoutDashboard, 'Dashboard'],
+    [Building2, 'Properti'],
+    [Users, 'Penghuni'],
+    [CreditCard, 'Penagihan'],
+    [WalletCards, 'Keuangan']
+  ];
+
+  const pageTitle = useMemo(() => {
+    if (section === 'Dashboard') {
+      return ['Selamat Datang', `${activePropertyName} · Ringkasan data operasional kos hari ini.`];
+    }
+    return [section, `Sistem kelola ${section.toLowerCase()} Kontrakin yang akurat.`];
+  }, [section, activePropertyName]);
+
+  return (
+    <div className="app-shell">
+      {/* Desktop & Mobile Sidebar */}
+      <aside className={mobileOpen ? 'sidebar open' : 'sidebar'}>
+        <div className="brand">
+          <div className="brand-mark">
+            <Building2 size={20} />
+          </div>
+          <span>Kontrakin</span>
+          <button className="close-menu" type="button" onClick={() => setMobileOpen(false)}>
+            <X />
+          </button>
+        </div>
+
+        {/* Global Property Switcher */}
+        <div className="property-switcher">
+          <label htmlFor="global-property-switcher">Properti Aktif</label>
+          <select
+            id="global-property-switcher"
+            value={selectedPropertyId}
+            onChange={e => setSelectedPropertyId(e.target.value)}
+          >
+            <option value="all">Semua Properti</option>
+            {properties.map(p => (
+              <option key={p.id} value={p.id}>
+                {p.name}
+              </option>
+            ))}
+          </select>
+        </div>
+
+        <nav>
+          {menuItems.map(([Icon, label]) => (
+            <button
+              key={label}
+              type="button"
+              className={section === label ? 'active' : ''}
+              onClick={() => {
+                setSection(label);
+                setMobileOpen(false);
+              }}
+            >
+              <Icon size={19} />
+              <span>{label}</span>
+              {label === 'Penagihan' && unpaidInvoicesCount > 0 && <em>{unpaidInvoicesCount}</em>}
+            </button>
+          ))}
+        </nav>
+
+        <div className="sidebar-bottom">
+          <button
+            type="button"
+            className={section === 'Pengaturan' ? 'active' : ''}
+            onClick={() => setSection('Pengaturan')}
+          >
+            <Settings size={19} />
+            <span>Pengaturan</span>
+          </button>
+          <div className="help-card">
+            <span>Supabase Database Terkoneksi</span>
+          </div>
+          <div className="user">
+            <div className="avatar dark font-bold">{initials(user.email)}</div>
+            <div className="user-info">
+              <b>{user.email}</b>
+              <small>Admin Properti</small>
+            </div>
+            <button className="icon-button logout" type="button" onClick={signOut} title="Keluar">
+              <LogOut size={17} />
+            </button>
+          </div>
+        </div>
+      </aside>
+
+      {/* Main Content Area */}
+      <main className="main">
+        <header className="topbar">
+          <button className="menu-toggle" type="button" onClick={() => setMobileOpen(v => !v)}>
+            <Menu />
+          </button>
+          <div className="topbar-property">
+            <b>{activePropertyName}</b>
+            <small>{selectedPropertyId === 'all' ? 'Gabungan seluruh properti aktif' : 'Properti aktif saat ini'}</small>
+          </div>
+          <div className="topbar-actions">
+            <button className="icon-button" type="button" onClick={loadData} title="Muat ulang data">
+              <RefreshCw size={17} />
+            </button>
+            <button
+              className="icon-button"
+              type="button"
+              onClick={() => setTheme(t => t === 'system' ? 'light' : t === 'light' ? 'dark' : 'system')}
+              title={`Ubah tema (Sekarang: ${theme})`}
+            >
+              <Sun size={17} />
+            </button>
+          </div>
+        </header>
+
+        <div className="page-content">
+          <div className="intro">
+            <div>
+              <h1>{pageTitle[0]}</h1>
+              <p>{pageTitle[1]}</p>
+            </div>
+          </div>
+
+          {error && <div className="error-box">{error}</div>}
+
+          {loading && !hasLoadedOnce ? (
+            <div className="panel loading py-8 text-center text-gray-500">
+              Menghubungkan ke database Kontrakin...
+            </div>
+          ) : (
+            <>
+              {section === 'Dashboard' && (
+                <Dashboard
+                  properties={properties}
+                  rooms={rooms}
+                  tenants={tenants}
+                  invoices={invoices}
+                  transactions={transactions}
+                  selectedPropertyId={selectedPropertyId}
+                />
+              )}
+              {section === 'Properti' && (
+                <PropertyManager
+                  properties={properties}
+                  rooms={rooms}
+                  reload={loadData}
+                  notify={notify}
+                />
+              )}
+              {section === 'Penghuni' && (
+                <TenantManager
+                  tenants={scopedTenants}
+                  rooms={scopedRooms}
+                  allRooms={rooms}
+                  properties={properties}
+                  reload={loadData}
+                  notify={notify}
+                />
+              )}
+              {section === 'Penagihan' && (
+                <InvoiceManager
+                  tenants={scopedTenants}
+                  rooms={scopedRooms}
+                  invoices={scopedInvoices}
+                  properties={properties}
+                  reload={loadData}
+                  notify={notify}
+                />
+              )}
+              {section === 'Keuangan' && (
+                <FinanceManager
+                  properties={properties}
+                  transactions={scopedTransactions}
+                  selectedPropertyId={selectedPropertyId}
+                  reload={loadData}
+                  notify={notify}
+                />
+              )}
+              {section === 'Pengaturan' && (
+                <SettingsManager
+                  user={user}
+                  properties={properties}
+                  reload={loadData}
+                  notify={notify}
+                  theme={theme}
+                  setTheme={setTheme}
+                  signOut={signOut}
+                />
+              )}
+            </>
+          )}
+        </div>
+      </main>
+
+      {/* Mobile Floating Bottom Bar */}
+      <div className="mobile-nav">
+        {menuItems.map(([Icon, label]) => (
+          <button
+            key={label}
+            type="button"
+            className={section === label ? 'active' : ''}
+            onClick={() => setSection(label)}
+          >
+            <Icon size={20} />
+            <span>{label}</span>
+            {label === 'Penagihan' && unpaidInvoicesCount > 0 && <em>{unpaidInvoicesCount}</em>}
+          </button>
+        ))}
+        <button
+          type="button"
+          className={section === 'Pengaturan' ? 'active' : ''}
+          onClick={() => setSection('Pengaturan')}
+        >
+          <Settings size={20} />
+          <span>Setelan</span>
+        </button>
+      </div>
+
+      {toast && <div className="toast">{toast}</div>}
+    </div>
+  );
 }
 
-function FinanceManager({properties,transactions,selectedPropertyId,reload,notify}){
- const [open,setOpen]=useState(false),[filter,setFilter]=useState('Semua');const [form,setForm]=useState({category:'Pemasukan',description:'',amount:'',transaction_date:today()});const set=(k,v)=>setForm(f=>({...f,[k]:v}));const activeProperty=selectedPropertyId==='all'?properties[0]:properties.find(p=>p.id===selectedPropertyId);
- const save=async e=>{e.preventDefault();if(!activeProperty||!form.description||!form.amount)return notify('Pilih properti dan lengkapi transaksi.');const value=(form.category==='Pengeluaran'?-1:1)*parseMoneyInput(form.amount);const {error}=await supabase.from('transactions').insert({property_id:activeProperty.id,category:form.category,description:form.description,amount:value,transaction_date:form.transaction_date});if(error)return notify(error.message);setOpen(false);setForm({category:'Pemasukan',description:'',amount:'',transaction_date:today()});notify('Transaksi tersimpan.');reload()};
- const del=async t=>{if(!confirm('Hapus transaksi ini dari Keuangan? Invoice/tagihan tidak ikut dihapus.'))return;const {error}=await supabase.from('transactions').delete().eq('id',t.id);if(error)return notify(error.message);reload();notify('Transaksi dihapus.')}; const deleteAll=async()=>{if(!transactions.length)return notify('Tidak ada data Keuangan.');if(!confirm(`Hapus semua ${transactions.length} transaksi yang sedang ditampilkan?`))return;const ids=transactions.map(t=>t.id);const {error}=await supabase.from('transactions').delete().in('id',ids);if(error)return notify(error.message);reload();notify('Data Keuangan yang ditampilkan berhasil dihapus.')};
- const income=transactions.filter(t=>Number(t.amount)>0).reduce((s,t)=>s+Number(t.amount),0),expense=transactions.filter(t=>Number(t.amount)<0).reduce((s,t)=>s+Math.abs(Number(t.amount)),0),filtered=transactions.filter(t=>filter==='Semua'||(filter==='Pemasukan'&&Number(t.amount)>0)||(filter==='Pengeluaran'&&Number(t.amount)<0));
- return <section className="module-full"><div className="module-toolbar"><div><h2>Keuangan</h2><p>Uang masuk dan keluar yang benar-benar terjadi.</p></div><div className="toolbar-actions">{transactions.length>0&&<button className="danger-outline-btn" onClick={deleteAll}><Trash2 size={16}/> Hapus semua</button>}<button className="add-button" onClick={()=>setOpen(true)}><Plus size={17}/> Tambah transaksi</button></div></div><div className="finance-summary"><div><span>Total pemasukan</span><strong>{rupiah(income)}</strong></div><div><span>Total pengeluaran</span><strong>{rupiah(expense)}</strong></div><div><span>Saldo bersih</span><strong>{rupiah(income-expense)}</strong></div></div><div className="finance-filters">{['Semua','Pemasukan','Pengeluaran'].map(x=><button key={x} className={filter===x?'active':''} onClick={()=>setFilter(x)}>{x}</button>)}</div>{open&&<form className="edit-card" onSubmit={save}><h3>Transaksi baru</h3><div className="form-grid"><label>Properti<select value={activeProperty?.id||''} disabled><option>{activeProperty?.name||'Pilih properti'}</option></select></label><label>Jenis<select value={form.category} onChange={e=>set('category',e.target.value)}><option>Pemasukan</option><option>Pengeluaran</option></select></label><label>Deskripsi<input value={form.description} onChange={e=>set('description',e.target.value)} required/></label><label>Nominal tagihan<MoneyInput value={form.amount} onChange={v=>set('amount',v)} required/></label><label>Tanggal<input type="date" value={form.transaction_date} onChange={e=>set('transaction_date',e.target.value)} required/></label></div><div className="form-actions"><button className="primary">Simpan</button><button type="button" onClick={()=>setOpen(false)}>Batal</button></div></form>}<div className="data-table panel">{filtered.length===0?<div className="empty">Tidak ada transaksi.</div>:filtered.map(t=><div className="invoice-row" key={t.id}><div><b>{t.description}</b><small>{t.category} · {t.transaction_date}</small></div><strong className={Number(t.amount)>0?'income':'expense'}>{Number(t.amount)>0?'+':'−'}{rupiah(Math.abs(Number(t.amount)))}</strong><button type="button" className="danger delete-transaction" onClick={()=>del(t)}><Trash2 size={15}/> Hapus</button></div>)}</div></section>
+function Root() {
+  const [session, setSession] = useState(null);
+  const [checking, setChecking] = useState(true);
+
+  useEffect(() => {
+    let mounted = true;
+    supabase.auth.getSession().then(({ data }) => {
+      if (mounted) {
+        setSession(data.session);
+        setChecking(false);
+      }
+    });
+
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((_e, s) => {
+      setSession(s);
+    });
+
+    return () => {
+      mounted = false;
+      subscription.unsubscribe();
+    };
+  }, []);
+
+  if (checking) {
+    return (
+      <div className="login-shell">
+        <div className="login-card p-6 text-center text-gray-500">
+          Memeriksa sesi Kontrakin...
+        </div>
+      </div>
+    );
+  }
+
+  return session ? <App user={session.user} /> : <Login />;
 }
 
-function SettingsManager({user,properties,reload,notify,theme,setTheme,signOut}){const p=properties[0];const [name,setName]=useState(p?.name||'');const [address,setAddress]=useState(p?.address||'');const [adminEmail,setAdminEmail]=useState(p?.admin_email||user.email||'');const [busy,setBusy]=useState(false);useEffect(()=>{setName(p?.name||'');setAddress(p?.address||'');setAdminEmail(p?.admin_email||user.email||'')},[p?.id,p?.name,p?.address,p?.admin_email,user.email]);const save=async e=>{e.preventDefault();setBusy(true);let res;if(p)res=await supabase.from('properties').update({name,address:address||null,admin_email:adminEmail.trim()||user.email}).eq('id',p.id);else res=await supabase.from('properties').insert({name:name||'Kos Baru',address:address||null,admin_email:adminEmail.trim()||user.email});setBusy(false);if(res.error)return notify(res.error.message);notify('Pengaturan properti tersimpan.');reload()};
-  const exportAll=async()=>{
-    const tables=[['properties',['id','name','address','created_at']],['rooms',['id','property_id','room_number','monthly_rate','status','facilities','maintenance_notes']],['tenants',['id','room_id','full_name','email','whatsapp_number','id_card_number','lease_start','lease_end','billing_day','created_at']],['invoices',['id','tenant_id','room_id','due_date','amount','paid_amount','status','paid_at','created_at']],['transactions',['id','property_id','invoice_id','category','description','amount','transaction_date','created_at']]];
-    for(const [table,headers] of tables){const {data,error}=await supabase.from(table).select('*'); if(error)return notify(`Export ${table} gagal: ${error.message}`); downloadCSV(`${table}-${today()}.csv`,headers,(data||[]).map(row=>headers.map(h=>Array.isArray(row[h])?row[h].join(' | '):row[h]))); await new Promise(r=>setTimeout(r,150));}
-    notify('Backup CSV/Excel semua data selesai.');
-  };
-  return <section className="module-full"><div className="module-toolbar"><div><h2>Pengaturan</h2><p>Kelola profil properti dan preferensi aplikasi.</p></div><button className="secondary-button" onClick={exportAll}><Download size={16}/> Backup semua data (CSV/Excel)</button></div><div className="settings-grid"><form className="edit-card" onSubmit={save}><h3>Profil properti</h3><label>Nama kos/properti<input value={name} onChange={e=>setName(e.target.value)} placeholder="Kos Cendana" required/></label><label>Alamat<input value={address} onChange={e=>setAddress(e.target.value)} placeholder="Alamat lengkap"/></label><label>Email admin untuk notifikasi tagihan<input type="email" value={adminEmail} onChange={e=>setAdminEmail(e.target.value)} placeholder="emailkamu@gmail.com" required/><small className="form-hint">Reminder tagihan otomatis dikirim ke email ini, bukan ke penghuni.</small></label><div className="form-actions"><button className="primary" disabled={busy}><Save size={15}/> Simpan</button></div></form><div className="edit-card"><h3>Tampilan</h3><label>Tema<select value={theme} onChange={e=>setTheme(e.target.value)}><option value="system">Otomatis</option><option value="light">Terang</option><option value="dark">Gelap</option></select></label><h3 className="settings-sub">Akun</h3><div className="account-box"><div className="avatar dark">{initials(user.email)}</div><div><b>{user.email}</b><small>Admin Properti</small></div></div><button className="logout-button" onClick={signOut}><LogOut size={16}/> Keluar</button></div></div></section>}
-
-function Root(){const [session,setSession]=useState(null);const [checking,setChecking]=useState(true);useEffect(()=>{let mounted=true;supabase.auth.getSession().then(({data})=>{if(mounted){setSession(data.session);setChecking(false)}});const {data:{subscription}}=supabase.auth.onAuthStateChange((_e,s)=>setSession(s));return()=>{mounted=false;subscription.unsubscribe()}} ,[]);if(checking)return <div className="login-shell"><div className="login-card">Memeriksa sesi...</div></div>;return session?<App user={session.user}/>:<Login/>}
-
-createRoot(document.getElementById('root')).render(<Root/>);
+createRoot(document.getElementById('root')).render(<Root />);
