@@ -37,84 +37,6 @@ export function InvoiceManager({ tenants, rooms, invoices, properties, reload, n
   const remain = i => Math.max(0, Number(i.amount || 0) - Number(i.paid_amount || 0));
   const autoAmount = t => Number(roomFor(t)?.monthly_rate || 0);
 
-  // Memoized keys to detect modifications without infinite loop trigger
-  const tenantsKey = useMemo(() => {
-    return tenants.map(t => `${t.id}::${t.room_id}::${t.lease_start}::${t.billing_day}`).join('|');
-  }, [tenants]);
-
-  const roomsKey = useMemo(() => {
-    return rooms.map(r => `${r.id}::${r.monthly_rate}::${r.status}`).join('|');
-  }, [rooms]);
-
-  // SINKRONISASI INVOICE OTOMATIS:
-  // Membuat tagihan bulanan penuh tanpa prorata dari siklus tanggal sewa ke hari ini
-  const syncAutomaticInvoices = async () => {
-    const rows = [];
-    for (const t of tenants.filter(t => t.room_id && t.lease_start)) {
-      const r = roomFor(t);
-      if (!r) continue;
-
-      const start = parseDateLocal(t.lease_start);
-      const end = t.lease_end ? parseDateLocal(t.lease_end) : null;
-      
-      // Let's iterate month-by-month starting from the month of the lease start
-      let cursor = new Date(start.getFullYear(), start.getMonth(), 1);
-      
-      // Safety limit to 120 months (10 years)
-      for (let n = 0; n < 120; n++) {
-        // Compute due date matching the tenant's specific billing day
-        const billingDay = Number(t.billing_day || start.getDate());
-        const due = monthDueDate(cursor.getFullYear(), cursor.getMonth(), billingDay);
-        const d = parseDateLocal(due);
-        
-        // Don't generate future invoices automatically
-        if (d > parseDateLocal(today())) break;
-        
-        // Stop if lease has ended
-        if (end && d > end) break;
-
-        // Skip if due date is before lease start (e.g. customized billing day shifts)
-        if (d < start) {
-          cursor = new Date(cursor.getFullYear(), cursor.getMonth() + 1, 1);
-          continue;
-        }
-
-        // Add if it falls within the active period
-        rows.push({
-          tenant_id: t.id,
-          room_id: r.id,
-          due_date: due,
-          amount: Number(r.monthly_rate || 0),
-          status: 'unpaid',
-          paid_amount: 0
-        });
-
-        // Increment cursor to next month
-        cursor = new Date(cursor.getFullYear(), cursor.getMonth() + 1, 1);
-      }
-    }
-
-    if (rows.length) {
-      const { error } = await supabase.from('invoices').upsert(rows, {
-        onConflict: 'tenant_id,due_date',
-        ignoreDuplicates: true
-      });
-      if (error) {
-        console.warn('Gagal sync invoice otomatis:', error.message);
-      }
-    }
-
-    // Automatically flag past-due unpaid invoices as overdue
-    await supabase.from('invoices').update({ status: 'overdue' }).eq('status', 'unpaid').lt('due_date', today());
-    reload();
-  };
-
-  useEffect(() => {
-    if (tenants.length && rooms.length) {
-      syncAutomaticInvoices();
-    }
-  }, [tenantsKey, roomsKey]);
-
   const saveInvoice = async e => {
     e.preventDefault();
     const t = tenants.find(x => x.id === form.tenant_id);
@@ -124,46 +46,107 @@ export function InvoiceManager({ tenants, rooms, invoices, properties, reload, n
       return notify('Silakan pilih penghuni yang sudah memiliki kamar.');
     }
 
+    setBusy(true);
+
+    // Ambil seluruh invoice yang ada untuk tenant ini terlebih dahulu
+    // Ini agar jika ada invoice yang sudah ada pada tanggal jatuh tempo yang sama, kita bisa mengupdate nominalnya (amount)
+    // tanpa menimpa status lunas/pembayaran yang sudah dicicil (paid_amount).
+    const { data: existing, error: fetchErr } = await supabase
+      .from('invoices')
+      .select('*')
+      .eq('tenant_id', t.id);
+
+    if (fetchErr) {
+      setBusy(false);
+      return notify('Gagal memeriksa data tagihan yang sudah ada: ' + fetchErr.message);
+    }
+
     const count = Math.max(1, Math.min(24, Number(form.monthCount) || 1));
     const rows = [];
 
-    for (let n = 0; n < count; n++) {
-      const due = addMonthsDate(form.due_date, n);
-      const amount = form.manualAmount ? Number(form.amount) : autoAmount(t);
-      rows.push({
-        tenant_id: t.id,
-        room_id: r.id,
-        due_date: due,
-        amount,
-        status: 'unpaid',
-        paid_amount: 0
-      });
-    }
-
-    setBusy(true);
-    let result;
     if (editing) {
-      result = await supabase.from('invoices')
+      // Skenario Edit Satu Invoice Tertentu
+      const amount = form.manualAmount ? Number(form.amount) : autoAmount(t);
+      const paidAmount = Number(editing.paid_amount || 0);
+      const remainAmount = Math.max(0, amount - paidAmount);
+      
+      // Hitung status baru berdasarkan nominal baru dan sisa pembayaran
+      let newStatus = 'unpaid';
+      if (remainAmount === 0) {
+        newStatus = 'paid';
+      } else if (parseDateLocal(form.due_date) < parseDateLocal(today())) {
+        newStatus = 'overdue';
+      }
+
+      const result = await supabase.from('invoices')
         .update({
           due_date: form.due_date,
-          amount: form.manualAmount ? Number(form.amount) : autoAmount(t)
+          amount,
+          status: newStatus
         })
         .eq('id', editing.id);
-    } else {
-      result = await supabase.from('invoices').upsert(rows, {
-        onConflict: 'tenant_id,due_date',
-        ignoreDuplicates: true
-      });
-    }
 
-    setBusy(false);
-    if (result.error) {
-      return notify(result.error.message);
+      setBusy(false);
+      if (result.error) {
+        return notify(result.error.message);
+      }
+    } else {
+      // Skenario Pembuatan Tagihan Baru (Bisa Multi Bulan)
+      for (let n = 0; n < count; n++) {
+        const due = addMonthsDate(form.due_date, n);
+        const amount = form.manualAmount ? Number(form.amount) : autoAmount(t);
+        
+        // Cari apakah ada invoice yang sudah terbit di tanggal yang sama untuk tenant ini
+        const ext = (existing || []).find(i => i.due_date === due);
+        
+        if (ext) {
+          // Jika ada, kita TIMPA amount-nya, tetapi kita jaga paid_amount dan statusnya
+          const paidAmount = Number(ext.paid_amount || 0);
+          const remainAmount = Math.max(0, amount - paidAmount);
+          
+          let newStatus = 'unpaid';
+          if (remainAmount === 0) {
+            newStatus = 'paid';
+          } else if (parseDateLocal(due) < parseDateLocal(today())) {
+            newStatus = 'overdue';
+          }
+
+          rows.push({
+            id: ext.id,
+            tenant_id: t.id,
+            room_id: r.id,
+            due_date: due,
+            amount,
+            status: newStatus,
+            paid_amount: paidAmount
+          });
+        } else {
+          // Jika belum ada, buat baru dari nol
+          rows.push({
+            tenant_id: t.id,
+            room_id: r.id,
+            due_date: due,
+            amount,
+            status: parseDateLocal(due) < parseDateLocal(today()) ? 'overdue' : 'unpaid',
+            paid_amount: 0
+          });
+        }
+      }
+
+      // Upsert ke database tanpa ignoreDuplicates agar data yang konflik ter-update dengan aman!
+      const result = await supabase.from('invoices').upsert(rows, {
+        onConflict: 'id' // Karena beberapa baris sudah punya ID, kita match berdasarkan ID. Jika tidak ada ID, dia otomatis INSERT.
+      });
+
+      setBusy(false);
+      if (result.error) {
+        return notify(result.error.message);
+      }
     }
 
     setOpen(false);
     setEditing(null);
-    notify(editing ? 'Tagihan berhasil diperbarui.' : `${count} periode tagihan berhasil ditambahkan.`);
+    notify(editing ? 'Tagihan berhasil diperbarui.' : `${count} periode tagihan berhasil ditambahkan/diperbarui.`);
     reload();
   };
 

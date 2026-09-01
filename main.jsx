@@ -7,7 +7,7 @@ import {
 
 import './styles.css';
 import { supabase } from './supabase';
-import { initials } from './utils';
+import { initials, parseDateLocal, today, monthDueDate } from './utils';
 
 // Import Modular Components
 import { Login } from './components/Login';
@@ -54,21 +54,92 @@ function App({ user }) {
     setError('');
 
     try {
-      const [pRes, rRes, tRes, iRes, txRes] = await Promise.all([
+      // 1. Ambil data properti, kamar, dan penyewa terlebih dahulu untuk perhitungan sinkronisasi
+      const [pRes, rRes, tRes] = await Promise.all([
         supabase.from('properties').select('*').order('created_at'),
         supabase.from('rooms').select('*').order('room_number'),
-        supabase.from('tenants').select('*').order('created_at', { ascending: false }),
+        supabase.from('tenants').select('*').order('created_at', { ascending: false })
+      ]);
+
+      const failedPre = [pRes, rRes, tRes].find(r => r.error);
+      if (failedPre) {
+        setError(failedPre.error.message);
+        return;
+      }
+
+      const activeProperties = pRes.data || [];
+      const activeRooms = rRes.data || [];
+      const activeTenants = tRes.data || [];
+
+      // 2. Lakukan sinkronisasi tagihan otomatis di server/DB
+      // Kita generate tagihan hingga akhir bulan berjalan ini (agar tagihan bulan ini sudah muncul meskipun tgl jatuh temponya di akhir bulan)
+      // Dan selalu generate minimal tagihan pertama (n === 0) walaupun tgl sewa dimulai di bulan depan.
+      const todayDate = parseDateLocal(today());
+      const endOfCurrentMonth = new Date(todayDate.getFullYear(), todayDate.getMonth() + 1, 0);
+
+      const rows = [];
+      for (const t of activeTenants.filter(t => t.room_id && t.lease_start)) {
+        const r = activeRooms.find(room => room.id === t.room_id);
+        if (!r) continue;
+
+        const start = parseDateLocal(t.lease_start);
+        const end = t.lease_end ? parseDateLocal(t.lease_end) : null;
+        let cursor = new Date(start.getFullYear(), start.getMonth(), 1);
+
+        for (let n = 0; n < 120; n++) {
+          const billingDay = Number(t.billing_day || start.getDate());
+          const due = monthDueDate(cursor.getFullYear(), cursor.getMonth(), billingDay);
+          const d = parseDateLocal(due);
+
+          // Batasi pembuatan tagihan otomatis:
+          // Jika sudah melewati akhir bulan berjalan DAN bukan merupakan tagihan pertama (n > 0), hentikan.
+          if (d > endOfCurrentMonth && n > 0) break;
+          if (end && d > end) break;
+
+          if (d < start) {
+            cursor = new Date(cursor.getFullYear(), cursor.getMonth() + 1, 1);
+            continue;
+          }
+
+          rows.push({
+            tenant_id: t.id,
+            room_id: r.id,
+            due_date: due,
+            amount: Number(r.monthly_rate || 0),
+            status: 'unpaid',
+            paid_amount: 0
+          });
+
+          cursor = new Date(cursor.getFullYear(), cursor.getMonth() + 1, 1);
+        }
+      }
+
+      if (rows.length) {
+        const { error: upsertErr } = await supabase.from('invoices').upsert(rows, {
+          onConflict: 'tenant_id,due_date',
+          ignoreDuplicates: true
+        });
+        if (upsertErr) {
+          console.warn('Gagal sync invoice otomatis:', upsertErr.message);
+        }
+      }
+
+      // Tandai otomatis tagihan jatuh tempo yang belum lunas sebagai overdue
+      await supabase.from('invoices').update({ status: 'overdue' }).eq('status', 'unpaid').lt('due_date', today());
+
+      // 3. Ambil data tagihan (invoices) dan transaksi terbaru setelah sinkronisasi selesai
+      const [iRes, txRes] = await Promise.all([
         supabase.from('invoices').select('*').order('due_date', { ascending: false }),
         supabase.from('transactions').select('*').order('transaction_date', { ascending: false }).limit(300)
       ]);
 
-      const failed = [pRes, rRes, tRes, iRes, txRes].find(r => r.error);
-      if (failed) {
-        setError(failed.error.message);
+      const failedPost = [iRes, txRes].find(r => r.error);
+      if (failedPost) {
+        setError(failedPost.error.message);
       } else {
-        setProperties(pRes.data || []);
-        setRooms(rRes.data || []);
-        setTenants(tRes.data || []);
+        setProperties(activeProperties);
+        setRooms(activeRooms);
+        setTenants(activeTenants);
         setInvoices(iRes.data || []);
         setTransactions(txRes.data || []);
       }
