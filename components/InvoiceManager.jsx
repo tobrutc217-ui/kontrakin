@@ -37,6 +37,15 @@ export function InvoiceManager({ tenants, rooms, invoices, properties, reload, n
   const remain = i => Math.max(0, Number(i.amount || 0) - Number(i.paid_amount || 0));
   const autoAmount = t => Number(roomFor(t)?.monthly_rate || 0);
 
+  // Memoized keys to detect modifications without infinite loop trigger
+  const tenantsKey = useMemo(() => {
+    return tenants.map(t => `${t.id}::${t.room_id}::${t.lease_start}::${t.billing_day}`).join('|');
+  }, [tenants]);
+
+  const roomsKey = useMemo(() => {
+    return rooms.map(r => `${r.id}::${r.monthly_rate}::${r.status}`).join('|');
+  }, [rooms]);
+
   // SINKRONISASI INVOICE OTOMATIS:
   // Membuat tagihan bulanan penuh tanpa prorata dari siklus tanggal sewa ke hari ini
   const syncAutomaticInvoices = async () => {
@@ -63,6 +72,12 @@ export function InvoiceManager({ tenants, rooms, invoices, properties, reload, n
         
         // Stop if lease has ended
         if (end && d > end) break;
+
+        // Skip if due date is before lease start (e.g. customized billing day shifts)
+        if (d < start) {
+          cursor = new Date(cursor.getFullYear(), cursor.getMonth() + 1, 1);
+          continue;
+        }
 
         // Add if it falls within the active period
         rows.push({
@@ -98,7 +113,7 @@ export function InvoiceManager({ tenants, rooms, invoices, properties, reload, n
     if (tenants.length && rooms.length) {
       syncAutomaticInvoices();
     }
-  }, [tenants.length, rooms.length]);
+  }, [tenantsKey, roomsKey]);
 
   const saveInvoice = async e => {
     e.preventDefault();
