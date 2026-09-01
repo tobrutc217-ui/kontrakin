@@ -15,7 +15,6 @@ export function InvoiceManager({ tenants, rooms, invoices, properties, reload, n
   const [paymentOpen, setPaymentOpen] = useState(false);
   const [paymentAmount, setPaymentAmount] = useState('');
   
-  // 🔥 SIMPEL: Hanya 2 tab - Belum Lunas & Sudah Lunas
   const [activeTab, setActiveTab] = useState('unpaid');
 
   const defaultMonthPeriod = () => {
@@ -59,10 +58,11 @@ export function InvoiceManager({ tenants, rooms, invoices, properties, reload, n
   }, [form.tenant_id, form.month_period, form.monthCount, tenants]);
 
   const roomFor = t => rooms.find(r => r.id === t?.room_id);
+  
+  // 🔥 PERBAIKAN 1: Hitung sisa dengan sangat ketat (pastikan angka)
   const remain = i => Math.max(0, Number(i.amount || 0) - Number(i.paid_amount || 0));
   const autoAmount = t => Number(roomFor(t)?.monthly_rate || 0);
 
-  // 🔥 FUNGSI SIMPAN TAGIHAN (DIPERBAIKI)
   const saveInvoice = async e => {
     e.preventDefault();
     const t = tenants.find(x => x.id === form.tenant_id);
@@ -72,7 +72,6 @@ export function InvoiceManager({ tenants, rooms, invoices, properties, reload, n
     setBusy(true);
     
     if (editing) {
-      // Edit single invoice
       const amount = form.manualAmount ? Number(form.amount) : autoAmount(t);
       const paidAmount = Number(editing.paid_amount || 0);
       let newStatus = 'unpaid';
@@ -90,31 +89,19 @@ export function InvoiceManager({ tenants, rooms, invoices, properties, reload, n
       notify('Tagihan berhasil diupdate!');
       reload();
     } else {
-      // Create new invoices (multi-bulan)
       const count = Math.max(1, Math.min(24, Number(form.monthCount) || 1));
       const rows = [];
       for (let n = 0; n < count; n++) {
         const due = addMonthsDate(form.due_date, n);
         const amount = form.manualAmount ? Number(form.amount) : autoAmount(t);
         const status = parseDateLocal(due) < parseDateLocal(today()) ? 'overdue' : 'unpaid';
-        rows.push({
-          tenant_id: t.id,
-          room_id: r.id,
-          due_date: due,
-          amount,
-          status,
-          paid_amount: 0
-        });
+        rows.push({ tenant_id: t.id, room_id: r.id, due_date: due, amount, status, paid_amount: 0 });
       }
       
-      const result = await supabase.from('invoices').upsert(rows, {
-        onConflict: 'tenant_id,due_date'
-      });
-      
+      const result = await supabase.from('invoices').upsert(rows, { onConflict: 'tenant_id,due_date' });
       setBusy(false);
       if (result.error) return notify('Gagal simpan: ' + result.error.message);
       
-      // Clear from deleted list
       try {
         let deletedList = JSON.parse(localStorage.getItem('kos_deleted_invoices') || '[]');
         const keysToClear = rows.map(row => `${t.id}::${row.due_date}`);
@@ -165,7 +152,6 @@ export function InvoiceManager({ tenants, rooms, invoices, properties, reload, n
     reload();
   };
 
-  // 🔥 GROUPING LEBIH SIMPLE
   const tenantGroups = useMemo(() => {
     const grouped = invoices.reduce((acc, i) => {
       const key = `${i.tenant_id}::${i.room_id}`;
@@ -182,24 +168,24 @@ export function InvoiceManager({ tenants, rooms, invoices, properties, reload, n
     return Object.values(grouped).filter(g => g.tenant && g.room);
   }, [invoices, tenants, rooms]);
 
-  const unpaidInvoices = useMemo(() => invoices.filter(i => i.status !== 'paid'), [invoices]);
-  const totalTunggakan = useMemo(() => unpaidInvoices.reduce((s, i) => s + remain(i), 0), [unpaidInvoices]);
-  const overdueInvoices = useMemo(() => unpaidInvoices.filter(i => overdueDays(i.due_date) > 0), [unpaidInvoices]);
-  const totalTerlambat = useMemo(() => overdueInvoices.reduce((s, i) => s + remain(i), 0), [overdueInvoices]);
-
-  // 🔥 FILTER SIMPLE: unpaid vs paid
+  // 🔥 PERBAIKAN 2: Filter yang SANGAT KETAT berdasarkan sisa tagihan (remain)
   const displayedGroups = useMemo(() => {
     return tenantGroups.filter(g => {
-      const activeItems = g.items.filter(i => i.status !== 'paid');
-      const outstandingSum = activeItems.reduce((s, i) => s + remain(i), 0);
-      if (activeTab === 'unpaid') return outstandingSum > 0;
-      return outstandingSum === 0;
+      // Hanya anggap "belum lunas" jika status BUKAN 'paid' DAN sisa tagihan > 0
+      const unpaidItems = g.items.filter(i => i.status !== 'paid' && remain(i) > 0);
+      const totalUnpaid = unpaidItems.reduce((s, i) => s + remain(i), 0);
+
+      if (activeTab === 'unpaid') {
+        return totalUnpaid > 0; // Tampilkan di tab Belum Lunas HANYA jika ada sisa
+      } else {
+        return totalUnpaid === 0; // Tampilkan di tab Lunas HANYA jika sisa = 0
+      }
     });
   }, [tenantGroups, activeTab]);
 
   const openPayment = g => {
-    const activeItems = g.items.filter(i => i.status !== 'paid');
-    const total = activeItems.reduce((s, i) => s + remain(i), 0);
+    const unpaidItems = g.items.filter(i => i.status !== 'paid' && remain(i) > 0);
+    const total = unpaidItems.reduce((s, i) => s + remain(i), 0);
     setSelectedGroup(g);
     setPaymentAmount(String(total));
     setPaymentOpen(true);
@@ -215,9 +201,8 @@ export function InvoiceManager({ tenants, rooms, invoices, properties, reload, n
     const now = new Date().toISOString();
     setBusy(true);
     
-    // FIFO: bayar dari yang paling lama dulu
     const unpaidSorted = [...g.items]
-      .filter(i => i.status !== 'paid')
+      .filter(i => i.status !== 'paid' && remain(i) > 0)
       .sort((a, b) => String(a.due_date).localeCompare(String(b.due_date)));
     
     for (const invoice of unpaidSorted) {
@@ -227,6 +212,7 @@ export function InvoiceManager({ tenants, rooms, invoices, properties, reload, n
       if (applied <= 0) continue;
       
       const newPaid = Number(invoice.paid_amount || 0) + applied;
+      // 🔥 PERBAIKAN 3: Pastikan status jadi 'paid' jika sisa <= 0
       const isLunas = newPaid >= Number(invoice.amount || 0);
       const newStatus = isLunas ? 'paid' : (overdueDays(invoice.due_date) > 0 ? 'overdue' : 'unpaid');
       
@@ -266,7 +252,6 @@ export function InvoiceManager({ tenants, rooms, invoices, properties, reload, n
     const totalPaidActual = amount - left;
     notify(`✅ Pembayaran ${rupiah(totalPaidActual)} berhasil dicatat!`);
     
-    // Open WA receipt
     setMessageType('paid');
     setMessage(buildPaidMessage(g, totalPaidActual));
     setMessageOpen(true);
@@ -274,8 +259,7 @@ export function InvoiceManager({ tenants, rooms, invoices, properties, reload, n
 
   const buildPenagihanMessage = g => {
     const prop = properties.find(p => p.id === g.room?.property_id) || properties[0];
-    const unpaidItems = g.items
-      .filter(i => i.status !== 'paid')
+    const unpaidItems = g.items.filter(i => i.status !== 'paid' && remain(i) > 0)
       .sort((a, b) => String(a.due_date).localeCompare(String(b.due_date)));
     
     const lines = unpaidItems.map(i => {
@@ -286,13 +270,6 @@ export function InvoiceManager({ tenants, rooms, invoices, properties, reload, n
     }).join('\n');
     
     const totalOutstanding = unpaidItems.reduce((s, i) => s + remain(i), 0);
-    const totalBillOriginal = unpaidItems.reduce((s, i) => s + Number(i.amount || 0), 0);
-    const totalAlreadyPaid = unpaidItems.reduce((s, i) => s + Number(i.paid_amount || 0), 0);
-    
-    let partialDetails = `\nTotal tagihan: ${rupiah(totalOutstanding)}\n`;
-    if (totalAlreadyPaid > 0) {
-      partialDetails = `\nTotal tagihan: ${rupiah(totalBillOriginal)}\nSudah dibayar: ${rupiah(totalAlreadyPaid)}\nSisa: ${rupiah(totalOutstanding)}\n`;
-    }
     
     const paymentText = [
       prop?.payment_bca && `BCA: ${prop.payment_bca}`,
@@ -311,7 +288,7 @@ Kamar: ${g.room?.room_number || ''}
 PERIODE:
 ${lines}
 
-${partialDetails}
+Total Sisa Tagihan: ${rupiah(totalOutstanding)}
 
 Pembayaran:
 ${paymentText}
@@ -321,7 +298,6 @@ Mohon konfirmasi setelah bayar. Terima kasih 🙏`;
 
   const buildPaidMessage = (g, paidAmount) => {
     const prop = properties.find(p => p.id === g.room?.property_id) || properties[0];
-    const remainingOutstanding = g.items.filter(i => i.status !== 'paid').reduce((s, i) => s + remain(i), 0);
     return `Halo ${g.tenant?.full_name || ''},
 
 Pembayaran kos sudah kami terima:
@@ -332,9 +308,7 @@ Kamar: ${g.room?.room_number || ''}
 Jumlah: ${rupiah(paidAmount)}
 Status: LUNAS ✅
 
-${remainingOutstanding > 0 ? `Sisa Tagihan: ${rupiah(remainingOutstanding)}` : 'Terima kasih atas pembayaran Anda!'}
-
-Terima kasih 🙏`;
+Terima kasih atas pembayaran Anda! 🙏`;
   };
 
   const openMessage = (g, type) => {
@@ -354,9 +328,8 @@ Terima kasih 🙏`;
 
   const sendWhatsApp = async () => {
     const t = selectedGroup?.tenant;
-    if (!t?.whatsapp_number || t.whatsapp_number.trim() === '') {
-      return notify('Nomor WA tidak ada.');
-    }
+    if (!t?.whatsapp_number || t.whatsapp_number.trim() === '') return notify('Nomor WA tidak ada.');
+    
     const cleanNumber = t.whatsapp_number.replace(/\D/g, '');
     if (!cleanNumber) return notify('Nomor WA tidak valid.');
     
@@ -364,7 +337,7 @@ Terima kasih 🙏`;
     window.open(waUrl, '_blank', 'noopener,noreferrer');
     
     if (messageType === 'reminder') {
-      const activeIds = selectedGroup.items.filter(i => i.status !== 'paid').map(i => i.id);
+      const activeIds = selectedGroup.items.filter(i => i.status !== 'paid' && remain(i) > 0).map(i => i.id);
       if (activeIds.length) {
         await supabase.from('invoices')
           .update({ collection_status: 'contacted', last_contacted_at: new Date().toISOString() })
@@ -383,153 +356,83 @@ Terima kasih 🙏`;
           <p>Buat tagihan, catat pembayaran, kirim WA.</p>
         </div>
         <div className="toolbar-actions">
-          <button
-            className="add-button"
-            type="button"
-            onClick={() => {
-              setEditing(null);
-              setForm({
-                tenant_id: '',
-                due_date: today(),
-                amount: '',
-                manualAmount: false,
-                monthCount: 1,
-                month_period: defaultMonthPeriod()
-              });
-              setOpen(true);
-            }}
-          >
+          <button className="add-button" type="button" onClick={() => {
+            setEditing(null);
+            setForm({ tenant_id: '', due_date: today(), amount: '', manualAmount: false, monthCount: 1, month_period: defaultMonthPeriod() });
+            setOpen(true);
+          }}>
             <ReceiptText size={17} /> Buat Tagihan
           </button>
         </div>
       </div>
 
-      {/* Summary */}
       <div className="billing-summary" id="billing-summary">
         <div>
           <small>Total Tunggakan</small>
-          <b>{rupiah(totalTunggakan)}</b>
+          <b>{rupiah(invoices.filter(i => i.status !== 'paid' && remain(i) > 0).reduce((s, i) => s + remain(i), 0))}</b>
         </div>
         <div>
           <small>Tunggakan Terlambat</small>
-          <b className="text-red-500">{rupiah(totalTerlambat)}</b>
-        </div>
-        <div>
-          <small>Jumlah Invoice Belum Lunas</small>
-          <b>{unpaidInvoices.length}</b>
+          <b className="text-red-500">{rupiah(invoices.filter(i => i.status !== 'paid' && remain(i) > 0 && overdueDays(i.due_date) > 0).reduce((s, i) => s + remain(i), 0))}</b>
         </div>
       </div>
 
-      {/* 🔥 TAB SIMPLE: Belum Lunas & Sudah Lunas */}
       <div className="billing-filter" id="billing-tab-filters">
         <button className={activeTab === 'unpaid' ? 'active' : ''} onClick={() => setActiveTab('unpaid')}>
-          🔴 Belum Lunas ({unpaidInvoices.length})
+          🔴 Belum Lunas
         </button>
         <button className={activeTab === 'paid' ? 'active' : ''} onClick={() => setActiveTab('paid')}>
           ✅ Sudah Lunas
         </button>
       </div>
 
-      {/* Form Buat Tagihan */}
       {open && (
         <form className="edit-card" onSubmit={saveInvoice} id="billing-form">
           <h3>{editing ? 'Edit Tagihan' : 'Buat Tagihan Baru'}</h3>
           <div className="form-grid">
             <label htmlFor="invoice-tenant">
               Pilih Penghuni
-              <select
-                id="invoice-tenant"
-                value={form.tenant_id}
-                onChange={e => {
-                  const tenantId = e.target.value;
-                  const tenant = tenants.find(x => x.id === tenantId);
-                  const calculatedDue = getCalculatedDueDate(tenantId, form.month_period);
-                  setForm(f => ({
-                    ...f,
-                    tenant_id: tenantId,
-                    due_date: calculatedDue,
-                    amount: tenant && !f.manualAmount ? String(autoAmount(tenant)) : f.amount
-                  }));
-                }}
-                required
-              >
+              <select id="invoice-tenant" value={form.tenant_id} onChange={e => {
+                const tenantId = e.target.value;
+                const tenant = tenants.find(x => x.id === tenantId);
+                setForm(f => ({
+                  ...f,
+                  tenant_id: tenantId,
+                  due_date: getCalculatedDueDate(tenantId, f.month_period),
+                  amount: tenant && !f.manualAmount ? String(autoAmount(tenant)) : f.amount
+                }));
+              }} required>
                 <option value="">Pilih penghuni</option>
                 {tenants.filter(t => t.room_id).map(t => {
                   const r = rooms.find(room => room.id === t.room_id);
-                  return (
-                    <option key={t.id} value={t.id}>
-                      {t.full_name} (Kamar {r?.room_number || '-'})
-                    </option>
-                  );
+                  return <option key={t.id} value={t.id}>{t.full_name} (Kamar {r?.room_number || '-'})</option>;
                 })}
               </select>
             </label>
             
             {!editing ? (
               <>
-                <label htmlFor="invoice-period">
-                  Bulan Mulai
-                  <input
-                    id="invoice-period"
-                    type="month"
-                    value={form.month_period}
-                    onChange={e => {
-                      const ym = e.target.value;
-                      setForm(f => ({
-                        ...f,
-                        month_period: ym,
-                        due_date: getCalculatedDueDate(f.tenant_id, ym)
-                      }));
-                    }}
-                    required
-                  />
+                <label htmlFor="invoice-period">Bulan Mulai
+                  <input id="invoice-period" type="month" value={form.month_period} onChange={e => setForm(f => ({ ...f, month_period: e.target.value, due_date: getCalculatedDueDate(f.tenant_id, e.target.value) }))} required />
                 </label>
-                <label htmlFor="invoice-count">
-                  Jumlah Bulan
-                  <input
-                    id="invoice-count"
-                    type="number"
-                    min="1"
-                    max="24"
-                    value={form.monthCount}
-                    onChange={e => set('monthCount', e.target.value)}
-                    required
-                  />
+                <label htmlFor="invoice-count">Jumlah Bulan
+                  <input id="invoice-count" type="number" min="1" max="24" value={form.monthCount} onChange={e => set('monthCount', e.target.value)} required />
                 </label>
               </>
             ) : (
-              <label htmlFor="invoice-due">
-                Tanggal Jatuh Tempo
-                <input
-                  id="invoice-due"
-                  type="date"
-                  value={form.due_date}
-                  onChange={e => set('due_date', e.target.value)}
-                  required
-                />
+              <label htmlFor="invoice-due">Tanggal Jatuh Tempo
+                <input id="invoice-due" type="date" value={form.due_date} onChange={e => set('due_date', e.target.value)} required />
               </label>
             )}
             
             <label htmlFor="invoice-amount" className="flex flex-col">
               <span className="flex justify-between items-center">
                 Nominal
-                <button
-                  type="button"
-                  className="text-xs text-blue-500 underline"
-                  onClick={() => set('manualAmount', !form.manualAmount)}
-                >
+                <button type="button" className="text-xs text-blue-500 underline" onClick={() => set('manualAmount', !form.manualAmount)}>
                   {form.manualAmount ? 'Pakai Tarif Otomatis' : 'Ubah Nominal'}
                 </button>
               </span>
-              <MoneyInput
-                id="invoice-amount"
-                value={form.amount}
-                onChange={val => {
-                  set('amount', val);
-                  set('manualAmount', true);
-                }}
-                required
-              />
+              <MoneyInput id="invoice-amount" value={form.amount} onChange={val => { set('amount', val); set('manualAmount', true); }} required />
             </label>
           </div>
           
@@ -537,75 +440,71 @@ Terima kasih 🙏`;
             <div className="mt-3 text-xs text-blue-800 bg-blue-50 border border-blue-200 p-3 rounded">
               <span className="font-semibold block mb-1">📅 Tanggal Jatuh Tempo ({previewDates.length} bulan):</span>
               <div className="flex flex-wrap gap-1">
-                {previewDates.map(d => {
-                  const formatted = new Intl.DateTimeFormat('id-ID', { day: 'numeric', month: 'long', year: 'numeric' }).format(parseDateLocal(d));
-                  return (
-                    <span key={d} className="bg-white border text-blue-700 px-2 py-0.5 rounded text-[11px]">
-                      {formatted}
-                    </span>
-                  );
-                })}
+                {previewDates.map(d => (
+                  <span key={d} className="bg-white border text-blue-700 px-2 py-0.5 rounded text-[11px]">
+                    {new Intl.DateTimeFormat('id-ID', { day: 'numeric', month: 'long', year: 'numeric' }).format(parseDateLocal(d))}
+                  </span>
+                ))}
               </div>
             </div>
           )}
           
           <div className="form-actions mt-4">
-            <button type="submit" className="primary" disabled={busy}>
-              <Save size={15} /> {editing ? 'Update' : 'Simpan'} Tagihan
-            </button>
-            <button type="button" onClick={() => { setOpen(false); setEditing(null); }}>
-              Batal
-            </button>
+            <button type="submit" className="primary" disabled={busy}><Save size={15} /> {editing ? 'Update' : 'Simpan'} Tagihan</button>
+            <button type="button" onClick={() => { setOpen(false); setEditing(null); }}>Batal</button>
           </div>
         </form>
       )}
 
-      {/* List Tagihan */}
       {displayedGroups.length === 0 ? (
-        <div className="empty panel">Tidak ada tagihan.</div>
+        <div className="empty panel">Tidak ada tagihan di kategori ini.</div>
       ) : (
         <div className="billing-room-list" id="billing-room-list">
           {displayedGroups.map(g => {
-            const activeItems = g.items.filter(i => i.status !== 'paid');
-            const totalOutstanding = activeItems.reduce((s, i) => s + remain(i), 0);
-            const hasOverdue = activeItems.some(i => overdueDays(i.due_date) > 0);
+            // 🔥 PERBAIKAN 4: Tampilkan item berdasarkan tab yang aktif secara ketat
+            const itemsToShow = activeTab === 'unpaid'
+              ? g.items.filter(i => i.status !== 'paid' && remain(i) > 0)
+              : g.items.filter(i => i.status === 'paid' || remain(i) === 0);
+
+            const totalToShow = itemsToShow.reduce((s, i) => s + (activeTab === 'unpaid' ? remain(i) : Number(i.amount || 0)), 0);
+            const hasOverdue = itemsToShow.some(i => overdueDays(i.due_date) > 0);
             
             return (
               <div
-                className={`billing-room-card ${totalOutstanding > 0 ? (hasOverdue ? 'is-overdue' : 'is-pending') : 'is-paid'}`}
+                className={`billing-room-card ${activeTab === 'unpaid' ? (hasOverdue ? 'is-overdue' : 'is-pending') : 'is-paid'}`}
                 key={`${g.tenant?.id}-${g.room?.id}`}
               >
                 <div className="billing-room-head">
                   <div>
                     <b>Kamar {g.room?.room_number || '-'} · {g.tenant?.full_name || 'Penghuni'}</b>
                     <small>
-                      {totalOutstanding > 0
-                        ? `${activeItems.length} bulan belum lunas${hasOverdue ? ' · ⚠️ Terlambat' : ''}`
-                        : '✅ Lunas'}
+                      {activeTab === 'unpaid'
+                        ? `${itemsToShow.length} bulan belum lunas${hasOverdue ? ' · ⚠️ Terlambat' : ''}`
+                        : '✅ Semua periode sudah lunas'}
                     </small>
                   </div>
-                  <strong>{rupiah(totalOutstanding)}</strong>
+                  <strong>{rupiah(totalToShow)}</strong>
                 </div>
                 
-                {activeItems.length > 0 && (
-                  <div className="billing-details">
-                    {activeItems
-                      .sort((a, b) => String(a.due_date).localeCompare(String(b.due_date)))
-                      .map(invoice => {
-                        const daysLate = overdueDays(invoice.due_date);
-                        return (
-                          <div className="billing-detail" key={invoice.id}>
-                            <span>
-                              {new Intl.DateTimeFormat('id-ID', { month: 'long', year: 'numeric' }).format(parseDateLocal(invoice.due_date))}
-                            </span>
-                            <b>{rupiah(remain(invoice))}</b>
-                            <small>
-                              {Number(invoice.paid_amount || 0) > 0
-                                ? `Dibayar: ${rupiah(invoice.paid_amount)}`
-                                : daysLate > 0
-                                  ? `⚠️ Terlambat ${daysLate} hari`
-                                  : 'Menunggu'}
-                            </small>
+                <div className="billing-details">
+                  {itemsToShow
+                    .sort((a, b) => String(a.due_date).localeCompare(String(b.due_date)))
+                    .map(invoice => {
+                      const daysLate = overdueDays(invoice.due_date);
+                      const isPaid = invoice.status === 'paid' || remain(invoice) === 0;
+                      
+                      return (
+                        <div className="billing-detail" key={invoice.id} style={{ opacity: isPaid ? 0.6 : 1 }}>
+                          <span>
+                            {new Intl.DateTimeFormat('id-ID', { month: 'long', year: 'numeric' }).format(parseDateLocal(invoice.due_date))}
+                          </span>
+                          <b>{rupiah(isPaid ? Number(invoice.amount || 0) : remain(invoice))}</b>
+                          <small>
+                            {isPaid 
+                              ? '✅ LUNAS' 
+                              : (Number(invoice.paid_amount || 0) > 0 ? `Dibayar sebagian: ${rupiah(invoice.paid_amount)}` : (daysLate > 0 ? `⚠️ Terlambat ${daysLate} hari` : 'Menunggu'))}
+                          </small>
+                          {activeTab === 'unpaid' && (
                             <div className="flex items-center gap-1">
                               <button type="button" onClick={() => editInvoice(invoice)} title="Edit" className="p-1 hover:bg-gray-100 rounded">
                                 <Pencil size={13} />
@@ -614,14 +513,14 @@ Terima kasih 🙏`;
                                 <Trash2 size={13} />
                               </button>
                             </div>
-                          </div>
-                        );
-                      })}
-                  </div>
-                )}
+                          )}
+                        </div>
+                      );
+                    })}
+                </div>
                 
                 <div className="billing-room-actions">
-                  {totalOutstanding > 0 ? (
+                  {activeTab === 'unpaid' ? (
                     <>
                       <button className="primary" type="button" onClick={() => openMessage(g, 'reminder')}>
                         <MessageCircle size={15} /> Kirim WA
@@ -646,32 +545,18 @@ Terima kasih 🙏`;
       {paymentOpen && selectedGroup && (
         <div className="modal-backdrop">
           <form className="modal" onSubmit={recordPayment}>
-            <button type="button" className="modal-close" onClick={() => setPaymentOpen(false)}>
-              <X />
-            </button>
+            <button type="button" className="modal-close" onClick={() => setPaymentOpen(false)}><X /></button>
             <h3>Catat Pembayaran</h3>
-            <p className="text-sm mb-4">
-              {selectedGroup.tenant?.full_name} · Kamar {selectedGroup.room?.room_number}
-            </p>
-            <label htmlFor="payout-amount">
-              Nominal Diterima (IDR)
-              <MoneyInput
-                id="payout-amount"
-                value={paymentAmount}
-                onChange={setPaymentAmount}
-                required
-              />
+            <p className="text-sm mb-4">{selectedGroup.tenant?.full_name} · Kamar {selectedGroup.room?.room_number}</p>
+            <label htmlFor="payout-amount">Nominal Diterima (IDR)
+              <MoneyInput id="payout-amount" value={paymentAmount} onChange={setPaymentAmount} required />
             </label>
             <div className="alert-notice bg-blue-50 border border-blue-200 p-3 rounded text-xs text-blue-800 mt-3">
               💡 Pembayaran akan otomatis melunasi tagihan paling lama dulu (FIFO).
             </div>
             <div className="form-actions mt-4">
-              <button type="submit" className="primary" disabled={busy}>
-                <CheckCircle2 size={15} /> Simpan Pembayaran
-              </button>
-              <button type="button" onClick={() => setPaymentOpen(false)}>
-                Batal
-              </button>
+              <button type="submit" className="primary" disabled={busy}><CheckCircle2 size={15} /> Simpan Pembayaran</button>
+              <button type="button" onClick={() => setPaymentOpen(false)}>Batal</button>
             </div>
           </form>
         </div>
@@ -681,26 +566,13 @@ Terima kasih 🙏`;
       {messageOpen && selectedGroup && (
         <div className="modal-backdrop">
           <div className="modal">
-            <button type="button" className="modal-close" onClick={() => setMessageOpen(false)}>
-              <X />
-            </button>
+            <button type="button" className="modal-close" onClick={() => setMessageOpen(false)}><X /></button>
             <h3>{messageType === 'paid' ? 'Konfirmasi Lunas' : 'Pesan Tagihan WA'}</h3>
-            <p className="text-xs text-gray-500 mb-2">
-              Ke: {selectedGroup.tenant?.whatsapp_number || 'Tidak ada nomor'}
-            </p>
-            <textarea
-              className="w-full font-mono text-sm border p-3 rounded bg-gray-50 focus:outline-none"
-              value={message}
-              onChange={e => setMessage(e.target.value)}
-              rows={15}
-            />
+            <p className="text-xs text-gray-500 mb-2">Ke: {selectedGroup.tenant?.whatsapp_number || 'Tidak ada nomor'}</p>
+            <textarea className="w-full font-mono text-sm border p-3 rounded bg-gray-50 focus:outline-none" value={message} onChange={e => setMessage(e.target.value)} rows={15} />
             <div className="form-actions mt-4">
-              <button className="primary" type="button" onClick={sendWhatsApp}>
-                <MessageCircle size={15} /> Buka WhatsApp
-              </button>
-              <button type="button" onClick={() => setMessageOpen(false)}>
-                Tutup
-              </button>
+              <button className="primary" type="button" onClick={sendWhatsApp}><MessageCircle size={15} /> Buka WhatsApp</button>
+              <button type="button" onClick={() => setMessageOpen(false)}>Tutup</button>
             </div>
           </div>
         </div>
