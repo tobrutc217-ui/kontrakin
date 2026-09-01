@@ -87,53 +87,50 @@ function App({ user }) {
 
       const rows = [];
       for (const t of activeTenants.filter(t => t.room_id && t.lease_start)) {
-        const r = activeRooms.find(room => room.id === t.room_id);
-        if (!r) continue;
-
-        const start = parseDateLocal(t.lease_start);
-        const end = t.lease_end ? parseDateLocal(t.lease_end) : null;
-        let cursor = new Date(start.getFullYear(), start.getMonth(), 1);
-
-        for (let n = 0; n < 120; n++) {
-          const billingDay = Number(t.billing_day || start.getDate());
-          const due = monthDueDate(cursor.getFullYear(), cursor.getMonth(), billingDay);
-          const d = parseDateLocal(due);
-
-          // Batasi pembuatan tagihan otomatis:
-          // Jika sudah melewati akhir bulan berjalan DAN bukan merupakan tagihan pertama (n > 0), hentikan.
-          if (d > endOfCurrentMonth && n > 0) break;
-          if (end && d > end) break;
-
-          if (d < start) {
-            cursor = new Date(cursor.getFullYear(), cursor.getMonth() + 1, 1);
-            continue;
-          }
-
-          // Jangan generate otomatis jika tagihan ini pernah dihapus secara sengaja oleh pengguna
-          const deletedKey = `${t.id}::${due}`;
-          if (deletedList.includes(deletedKey)) {
-            cursor = new Date(cursor.getFullYear(), cursor.getMonth() + 1, 1);
-            continue;
-          }
-
-          rows.push({
-            tenant_id: t.id,
-            room_id: r.id,
-            due_date: due,
-            amount: Number(r.monthly_rate || 0),
-            status: 'unpaid',
-            paid_amount: 0
-          });
-
-          cursor = new Date(cursor.getFullYear(), cursor.getMonth() + 1, 1);
-        }
-      }
+  const r = activeRooms.find(room => room.id === t.room_id);
+  if (!r) continue;
+  
+  const start = parseDateLocal(t.lease_start);
+  const end = t.lease_end ? parseDateLocal(t.lease_end) : null;
+  let cursor = new Date(start.getFullYear(), start.getMonth(), 1);
+  
+  for (let n = 0; n < 120; n++) {
+    const billingDay = Number(t.billing_day || start.getDate());
+    const due = monthDueDate(cursor.getFullYear(), cursor.getMonth(), billingDay);
+    const d = parseDateLocal(due);
+    
+    // Stop kalau sudah melewati akhir bulan berjalan DAN bukan tagihan pertama
+    if (d > endOfCurrentMonth && n > 0) break;
+    if (end && d > end) break;
+    if (d < start) {
+      cursor = new Date(cursor.getFullYear(), cursor.getMonth() + 1, 1);
+      continue;
+    }
+    
+    // Skip kalau pernah dihapus manual
+    const deletedKey = `${t.id}::${due}`;
+    if (deletedList.includes(deletedKey)) {
+      cursor = new Date(cursor.getFullYear(), cursor.getMonth() + 1, 1);
+      continue;
+    }
+    
+    rows.push({
+      tenant_id: t.id,
+      room_id: r.id,
+      due_date: due,
+      amount: Number(r.monthly_rate || 0),
+      status: d < todayDate ? 'overdue' : 'unpaid',
+      paid_amount: 0
+    });
+    
+    cursor = new Date(cursor.getFullYear(), cursor.getMonth() + 1, 1);
+  }
+}
 
       if (rows.length) {
-        const { error: upsertErr } = await supabase.from('invoices').upsert(rows, {
-          onConflict: 'tenant_id,due_date',
-          ignoreDuplicates: true
-        });
+       const { error: upsertErr } = await supabase.from('invoices').upsert(rows, {
+  onConflict: 'tenant_id,due_date'
+});
         if (upsertErr) {
           console.warn('Gagal sync invoice otomatis:', upsertErr.message);
         }
