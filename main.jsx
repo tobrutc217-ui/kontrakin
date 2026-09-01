@@ -77,6 +77,14 @@ function App({ user }) {
       const todayDate = parseDateLocal(today());
       const endOfCurrentMonth = new Date(todayDate.getFullYear(), todayDate.getMonth() + 1, 0);
 
+      // Ambil daftar invoice yang sengaja dihapus agar tidak dibuat ulang otomatis
+      let deletedList = [];
+      try {
+        deletedList = JSON.parse(localStorage.getItem('kos_deleted_invoices') || '[]');
+      } catch (e) {
+        console.warn('Gagal membaca daftar invoice terhapus:', e);
+      }
+
       const rows = [];
       for (const t of activeTenants.filter(t => t.room_id && t.lease_start)) {
         const r = activeRooms.find(room => room.id === t.room_id);
@@ -97,6 +105,13 @@ function App({ user }) {
           if (end && d > end) break;
 
           if (d < start) {
+            cursor = new Date(cursor.getFullYear(), cursor.getMonth() + 1, 1);
+            continue;
+          }
+
+          // Jangan generate otomatis jika tagihan ini pernah dihapus secara sengaja oleh pengguna
+          const deletedKey = `${t.id}::${due}`;
+          if (deletedList.includes(deletedKey)) {
             cursor = new Date(cursor.getFullYear(), cursor.getMonth() + 1, 1);
             continue;
           }

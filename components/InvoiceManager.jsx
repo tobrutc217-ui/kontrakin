@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useMemo } from 'react';
-import { Pencil, MessageCircle, CheckCircle2, X, Save, ReceiptText, AlertTriangle } from 'lucide-react';
+import { Pencil, MessageCircle, CheckCircle2, X, Save, ReceiptText, AlertTriangle, Trash2 } from 'lucide-react';
 import { supabase } from '../supabase';
 import { rupiah, today, parseDateLocal, overdueDays, addMonthsDate, monthDueDate } from '../utils';
 import { MoneyInput } from './MoneyInput';
@@ -23,15 +23,60 @@ export function InvoiceManager({ tenants, rooms, invoices, properties, reload, n
   // 'pending' (Perlu Ditagih), 'contacted' (Sudah Ditagih), 'paid' (Lunas / Tidak Ada Tunggakan)
   const [activeTab, setActiveTab] = useState('pending');
 
+
+
+  const defaultMonthPeriod = () => {
+    const d = new Date();
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+  };
+
   const [form, setForm] = useState({
     tenant_id: '',
     due_date: today(),
     amount: '',
     manualAmount: false,
-    monthCount: 1
+    monthCount: 1,
+    month_period: defaultMonthPeriod()
   });
 
   const set = (k, v) => setForm(f => ({ ...f, [k]: v }));
+
+  const getCalculatedDueDate = (tenantId, monthPeriodStr) => {
+    const t = tenants.find(x => x.id === tenantId);
+    if (!t) return today();
+    
+    const periodYm = monthPeriodStr || defaultMonthPeriod();
+    const parts = periodYm.split('-');
+    const year = Number(parts[0]) || new Date().getFullYear();
+    const month = Number(parts[1]) || (new Date().getMonth() + 1);
+    
+    let billingDay = 1;
+    if (t.billing_day && !isNaN(Number(t.billing_day))) {
+      billingDay = Number(t.billing_day);
+    } else if (t.lease_start) {
+      const start = parseDateLocal(t.lease_start);
+      if (start && !isNaN(start.getTime())) {
+        billingDay = start.getDate();
+      }
+    }
+    
+    return monthDueDate(year, month - 1, billingDay);
+  };
+
+  const previewDates = useMemo(() => {
+    if (!form.tenant_id || !form.month_period) return [];
+    const t = tenants.find(x => x.id === form.tenant_id);
+    if (!t) return [];
+    
+    const count = Math.max(1, Math.min(24, Number(form.monthCount) || 1));
+    const dates = [];
+    const startCalculatedDue = getCalculatedDueDate(form.tenant_id, form.month_period);
+    
+    for (let n = 0; n < count; n++) {
+      dates.push(addMonthsDate(startCalculatedDue, n));
+    }
+    return dates;
+  }, [form.tenant_id, form.month_period, form.monthCount, tenants]);
 
   const roomFor = t => rooms.find(r => r.id === t?.room_id);
   const remain = i => Math.max(0, Number(i.amount || 0) - Number(i.paid_amount || 0));
@@ -90,11 +135,23 @@ export function InvoiceManager({ tenants, rooms, invoices, properties, reload, n
       if (result.error) {
         return notify(result.error.message);
       }
+
+      // Hapus dari daftar terhapus jika di-edit / di-re-create secara manual
+      try {
+        let deletedList = JSON.parse(localStorage.getItem('kos_deleted_invoices') || '[]');
+        const keyToClear = `${editing.tenant_id}::${form.due_date}`;
+        deletedList = deletedList.filter(k => k !== keyToClear);
+        localStorage.setItem('kos_deleted_invoices', JSON.stringify(deletedList));
+      } catch (e) {
+        console.warn(e);
+      }
     } else {
       // Skenario Pembuatan Tagihan Baru (Bisa Multi Bulan)
+      const clearedKeys = [];
       for (let n = 0; n < count; n++) {
         const due = addMonthsDate(form.due_date, n);
         const amount = form.manualAmount ? Number(form.amount) : autoAmount(t);
+        clearedKeys.push(`${t.id}::${due}`);
         
         // Cari apakah ada invoice yang sudah terbit di tanggal yang sama untuk tenant ini
         const ext = (existing || []).find(i => i.due_date === due);
@@ -112,7 +169,6 @@ export function InvoiceManager({ tenants, rooms, invoices, properties, reload, n
           }
 
           rows.push({
-            id: ext.id,
             tenant_id: t.id,
             room_id: r.id,
             due_date: due,
@@ -135,12 +191,21 @@ export function InvoiceManager({ tenants, rooms, invoices, properties, reload, n
 
       // Upsert ke database tanpa ignoreDuplicates agar data yang konflik ter-update dengan aman!
       const result = await supabase.from('invoices').upsert(rows, {
-        onConflict: 'id' // Karena beberapa baris sudah punya ID, kita match berdasarkan ID. Jika tidak ada ID, dia otomatis INSERT.
+        onConflict: 'tenant_id,due_date'
       });
 
       setBusy(false);
       if (result.error) {
         return notify(result.error.message);
+      }
+
+      // Hapus seluruh kunci yang dibuat dari daftar terhapus
+      try {
+        let deletedList = JSON.parse(localStorage.getItem('kos_deleted_invoices') || '[]');
+        deletedList = deletedList.filter(k => !clearedKeys.includes(k));
+        localStorage.setItem('kos_deleted_invoices', JSON.stringify(deletedList));
+      } catch (e) {
+        console.warn(e);
       }
     }
 
@@ -152,14 +217,46 @@ export function InvoiceManager({ tenants, rooms, invoices, properties, reload, n
 
   const editInvoice = i => {
     setEditing(i);
+    const d = parseDateLocal(i.due_date);
+    const yyyyMm = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
     setForm({
       tenant_id: i.tenant_id,
       due_date: i.due_date,
       amount: String(i.amount),
       manualAmount: true,
-      monthCount: 1
+      monthCount: 1,
+      month_period: yyyyMm
     });
     setOpen(true);
+  };
+
+  const deleteInvoice = async i => {
+    const tName = tenants.find(t => t.id === i.tenant_id)?.full_name || 'Penghuni';
+    const periodLabel = new Intl.DateTimeFormat('id-ID', { month: 'long', year: 'numeric' }).format(parseDateLocal(i.due_date));
+    if (!window.confirm(`Apakah Anda yakin ingin menghapus tagihan periode ${periodLabel} untuk ${tName}? Tindakan ini bersifat permanen.`)) {
+      return;
+    }
+    setBusy(true);
+    const { error } = await supabase.from('invoices').delete().eq('id', i.id);
+    setBusy(false);
+    if (error) {
+      return notify('Gagal menghapus tagihan: ' + error.message);
+    }
+
+    // Catat ke daftar terhapus agar tidak di-generate ulang otomatis
+    try {
+      const deletedList = JSON.parse(localStorage.getItem('kos_deleted_invoices') || '[]');
+      const key = `${i.tenant_id}::${i.due_date}`;
+      if (!deletedList.includes(key)) {
+        deletedList.push(key);
+        localStorage.setItem('kos_deleted_invoices', JSON.stringify(deletedList));
+      }
+    } catch (e) {
+      console.warn('Gagal mencatat invoice terhapus:', e);
+    }
+
+    notify('Tagihan berhasil dihapus.');
+    reload();
   };
 
   // Group invoices by tenant and room for aggregated view
@@ -433,7 +530,18 @@ Terima kasih 🙏`;
             type="button"
             onClick={() => {
               setEditing(null);
-              setForm({ tenant_id: '', due_date: today(), amount: '', manualAmount: false, monthCount: 1 });
+              const nowYm = (() => {
+                const d = new Date();
+                return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+              })();
+              setForm({
+                tenant_id: '',
+                due_date: today(),
+                amount: '',
+                manualAmount: false,
+                monthCount: 1,
+                month_period: nowYm
+              });
               setOpen(true);
             }}
           >
@@ -477,7 +585,7 @@ Terima kasih 🙏`;
 
       {/* Manual Billing Creator Form */}
       {open && (
-        <form className="edit-card" onSubmit={saveInvoice} id="billing-form">
+         <form className="edit-card" onSubmit={saveInvoice} id="billing-form">
           <h3>{editing ? 'Edit Tagihan' : 'Buat Tagihan Manual Baru'}</h3>
           <div className="form-grid">
             <label htmlFor="invoice-tenant">
@@ -486,11 +594,15 @@ Terima kasih 🙏`;
                 id="invoice-tenant"
                 value={form.tenant_id}
                 onChange={e => {
-                  const tenant = tenants.find(x => x.id === e.target.value);
-                  set('tenant_id', e.target.value);
-                  if (tenant && !form.manualAmount) {
-                    set('amount', String(autoAmount(tenant)));
-                  }
+                  const tenantId = e.target.value;
+                  const tenant = tenants.find(x => x.id === tenantId);
+                  const calculatedDue = getCalculatedDueDate(tenantId, form.month_period);
+                  setForm(f => ({
+                    ...f,
+                    tenant_id: tenantId,
+                    due_date: calculatedDue,
+                    amount: tenant && !f.manualAmount ? String(autoAmount(tenant)) : f.amount
+                  }));
                 }}
                 required
               >
@@ -506,27 +618,48 @@ Terima kasih 🙏`;
               </select>
             </label>
 
-            <label htmlFor="invoice-due">
-              Periode Mulai / Jatuh Tempo
-              <input
-                id="invoice-due"
-                type="date"
-                value={form.due_date}
-                onChange={e => set('due_date', e.target.value)}
-                required
-              />
-            </label>
+            {!editing ? (
+              <>
+                <label htmlFor="invoice-period">
+                  Bulan Periode Mulai
+                  <input
+                    id="invoice-period"
+                    type="month"
+                    value={form.month_period}
+                    onChange={e => {
+                      const ym = e.target.value;
+                      const calculatedDue = getCalculatedDueDate(form.tenant_id, ym);
+                      setForm(f => ({
+                        ...f,
+                        month_period: ym,
+                        due_date: calculatedDue
+                      }));
+                    }}
+                    required
+                  />
+                </label>
 
-            {!editing && (
-              <label htmlFor="invoice-count">
-                Jumlah Bulan / Periode Berurutan
+                <label htmlFor="invoice-count">
+                  Jumlah Bulan / Periode Berurutan
+                  <input
+                    id="invoice-count"
+                    type="number"
+                    min="1"
+                    max="24"
+                    value={form.monthCount}
+                    onChange={e => set('monthCount', e.target.value)}
+                    required
+                  />
+                </label>
+              </>
+            ) : (
+              <label htmlFor="invoice-due">
+                Tanggal Jatuh Tempo
                 <input
-                  id="invoice-count"
-                  type="number"
-                  min="1"
-                  max="24"
-                  value={form.monthCount}
-                  onChange={e => set('monthCount', e.target.value)}
+                  id="invoice-due"
+                  type="date"
+                  value={form.due_date}
+                  onChange={e => set('due_date', e.target.value)}
                   required
                 />
               </label>
@@ -554,6 +687,22 @@ Terima kasih 🙏`;
               />
             </label>
           </div>
+
+          {previewDates.length > 0 && (
+            <div className="mt-3 text-xs text-blue-800 bg-blue-50 border border-blue-200 p-3 rounded" id="billing-preview-dates">
+              <span className="font-semibold block mb-1">📅 Rencana Tanggal Jatuh Tempo ({previewDates.length} Bulan):</span>
+              <div className="flex flex-wrap gap-1">
+                {previewDates.map(d => {
+                  const formatted = new Intl.DateTimeFormat('id-ID', { day: 'numeric', month: 'long', year: 'numeric' }).format(parseDateLocal(d));
+                  return (
+                    <span key={d} className="bg-white border text-blue-700 px-2 py-0.5 rounded text-[11px] font-medium shadow-sm">
+                      {formatted}
+                    </span>
+                  );
+                })}
+              </div>
+            </div>
+          )}
 
           <p className="form-hint">
             Tagihan bulanan normal selalu memakai tarif kamar penuh. Jika tanggal tagihan berubah, lakukan perubahan siklus tanggal di menu Penghuni untuk menghitung prorata khusus pindah tanggal secara formal.
@@ -619,9 +768,14 @@ Terima kasih 🙏`;
                                 ? `Terlambat ${daysLate} hari`
                                 : 'Menunggu'}
                             </small>
-                            <button type="button" onClick={() => editInvoice(invoice)} title="Edit Tagihan">
-                              <Pencil size={13} />
-                            </button>
+                            <div className="flex items-center gap-1">
+                              <button type="button" onClick={() => editInvoice(invoice)} title="Edit Tagihan" className="p-1 hover:bg-gray-100 rounded">
+                                <Pencil size={13} />
+                              </button>
+                              <button type="button" onClick={() => deleteInvoice(invoice)} title="Hapus Tagihan" className="p-1 hover:bg-red-50 text-red-500 rounded">
+                                <Trash2 size={13} />
+                              </button>
+                            </div>
                           </div>
                         );
                       })}
@@ -650,6 +804,8 @@ Terima kasih 🙏`;
           })}
         </div>
       )}
+
+
 
       {/* Record Payment Modal */}
       {paymentOpen && selectedGroup && (

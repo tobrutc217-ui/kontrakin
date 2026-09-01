@@ -1,7 +1,7 @@
 import { createClient } from '@supabase/supabase-js';
 
-const supabaseUrl = import.meta.env.VITE_SUPABASE_URL;
-const supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY;
+const supabaseUrl = typeof import.meta.env !== 'undefined' ? import.meta.env.VITE_SUPABASE_URL : undefined;
+const supabaseAnonKey = typeof import.meta.env !== 'undefined' ? import.meta.env.VITE_SUPABASE_ANON_KEY : undefined;
 
 // --- High-Fidelity local-storage/in-memory mock database ---
 const getTable = (name) => {
@@ -61,6 +61,9 @@ class SupabaseQueryBuilder {
     this.orderAscending = true;
     this.limitCount = null;
     this._single = false;
+    this.action = 'select';
+    this.payload = null;
+    this.upsertOptions = {};
   }
 
   select(columns) {
@@ -99,111 +102,156 @@ class SupabaseQueryBuilder {
     return this;
   }
 
+  insert(payload) {
+    this.action = 'insert';
+    this.payload = payload;
+    return this;
+  }
+
+  update(payload) {
+    this.action = 'update';
+    this.payload = payload;
+    return this;
+  }
+
+  delete() {
+    this.action = 'delete';
+    return this;
+  }
+
+  upsert(payload, options = {}) {
+    this.action = 'upsert';
+    this.payload = payload;
+    this.upsertOptions = options;
+    return this;
+  }
+
   then(onfulfilled, onrejected) {
     return this.execute().then(onfulfilled, onrejected);
   }
 
   async execute() {
     let result = [...this.data];
-    for (const filter of this.filters) {
-      result = result.filter(filter);
+
+    if (this.action === 'select') {
+      for (const filter of this.filters) {
+        result = result.filter(filter);
+      }
+      if (this.orderByField) {
+        result.sort((a, b) => {
+          const valA = a[this.orderByField];
+          const valB = b[this.orderByField];
+          if (valA == null) return 1;
+          if (valB == null) return -1;
+          if (typeof valA === 'string') {
+            return this.orderAscending ? valA.localeCompare(valB) : valB.localeCompare(valA);
+          }
+          return this.orderAscending ? valA - valB : valB - valA;
+        });
+      }
+      if (this.limitCount !== null) {
+        result = result.slice(0, this.limitCount);
+      }
+      if (this._single) {
+        return { data: result[0] || null, error: null };
+      }
+      return { data: result, error: null };
     }
-    if (this.orderByField) {
-      result.sort((a, b) => {
-        const valA = a[this.orderByField];
-        const valB = b[this.orderByField];
-        if (valA == null) return 1;
-        if (valB == null) return -1;
-        if (typeof valA === 'string') {
-          return this.orderAscending ? valA.localeCompare(valB) : valB.localeCompare(valA);
+
+    if (this.action === 'insert') {
+      const items = Array.isArray(this.payload) ? this.payload : [this.payload];
+      const created = items.map(item => ({
+        id: item.id || `${this.table}-${Math.random().toString(36).substr(2, 9)}`,
+        created_at: new Date().toISOString(),
+        ...item
+      }));
+      this.data.push(...created);
+      setTable(this.table, this.data);
+      const output = Array.isArray(this.payload) ? created : created[0];
+      if (this._single) {
+        return { data: Array.isArray(output) ? output[0] || null : output, error: null };
+      }
+      return { data: output, error: null };
+    }
+
+    if (this.action === 'update') {
+      let matched = [...this.data];
+      for (const filter of this.filters) {
+        matched = matched.filter(filter);
+      }
+      const matchedIds = new Set(matched.map(m => m.id));
+      this.data = this.data.map(item => {
+        if (matchedIds.has(item.id)) {
+          return { ...item, ...this.payload };
         }
-        return this.orderAscending ? valA - valB : valB - valA;
+        return item;
       });
-    }
-    if (this.limitCount !== null) {
-      result = result.slice(0, this.limitCount);
-    }
-
-    if (this._single) {
-      return { data: result[0] || null, error: null };
-    }
-    return { data: result, error: null };
-  }
-
-  async insert(payload) {
-    const items = Array.isArray(payload) ? payload : [payload];
-    const created = items.map(item => ({
-      id: item.id || `${this.table}-${Math.random().toString(36).substr(2, 9)}`,
-      created_at: new Date().toISOString(),
-      ...item
-    }));
-    this.data.push(...created);
-    setTable(this.table, this.data);
-    return { data: Array.isArray(payload) ? created : created[0], error: null };
-  }
-
-  async update(payload) {
-    let matched = [...this.data];
-    for (const filter of this.filters) {
-      matched = matched.filter(filter);
-    }
-    const matchedIds = new Set(matched.map(m => m.id));
-    this.data = this.data.map(item => {
-      if (matchedIds.has(item.id)) {
-        return { ...item, ...payload };
+      setTable(this.table, this.data);
+      const updated = matched.map(m => ({ ...m, ...this.payload }));
+      if (this._single) {
+        return { data: updated[0] || null, error: null };
       }
-      return item;
-    });
-    setTable(this.table, this.data);
-    return { data: matched.map(m => ({ ...m, ...payload })), error: null };
-  }
-
-  async delete() {
-    let matched = [...this.data];
-    for (const filter of this.filters) {
-      matched = matched.filter(filter);
+      return { data: updated, error: null };
     }
-    const matchedIds = new Set(matched.map(m => m.id));
-    this.data = this.data.filter(item => !matchedIds.has(item.id));
-    setTable(this.table, this.data);
-    return { data: matched, error: null };
-  }
 
-  async upsert(payload, options = {}) {
-    const items = Array.isArray(payload) ? payload : [payload];
-    const onConflict = options.onConflict ? options.onConflict.split(',') : [];
-    const ignoreDuplicates = options.ignoreDuplicates === true;
-
-    const updatedOrInserted = [];
-    for (const item of items) {
-      let matchIdx = -1;
-      if (onConflict.length > 0) {
-        matchIdx = this.data.findIndex(existing => 
-          onConflict.every(field => String(existing[field]) === String(item[field]))
-        );
-      } else if (item.id) {
-        matchIdx = this.data.findIndex(existing => existing.id === item.id);
+    if (this.action === 'delete') {
+      let matched = [...this.data];
+      for (const filter of this.filters) {
+        matched = matched.filter(filter);
       }
+      const matchedIds = new Set(matched.map(m => m.id));
+      this.data = this.data.filter(item => !matchedIds.has(item.id));
+      setTable(this.table, this.data);
+      if (this._single) {
+        return { data: matched[0] || null, error: null };
+      }
+      return { data: matched, error: null };
+    }
 
-      if (matchIdx !== -1) {
-        if (!ignoreDuplicates) {
-          this.data[matchIdx] = { ...this.data[matchIdx], ...item };
-          updatedOrInserted.push(this.data[matchIdx]);
-        } else {
-          updatedOrInserted.push(this.data[matchIdx]);
+    if (this.action === 'upsert') {
+      const payload = this.payload;
+      const options = this.upsertOptions || {};
+      const items = Array.isArray(payload) ? payload : [payload];
+      const onConflict = options.onConflict ? options.onConflict.split(',') : [];
+      const ignoreDuplicates = options.ignoreDuplicates === true;
+
+      const updatedOrInserted = [];
+      for (const item of items) {
+        let matchIdx = -1;
+        if (onConflict.length > 0) {
+          matchIdx = this.data.findIndex(existing => 
+            onConflict.every(field => String(existing[field]) === String(item[field]))
+          );
+        } else if (item.id) {
+          matchIdx = this.data.findIndex(existing => existing.id === item.id);
         }
-      } else {
-        const newItem = {
-          id: item.id || `${this.table}-${Math.random().toString(36).substr(2, 9)}`,
-          created_at: new Date().toISOString(),
-          ...item
-        };
-        this.data.push(newItem);
-        updatedOrInserted.push(newItem);
+
+        if (matchIdx !== -1) {
+          if (!ignoreDuplicates) {
+            this.data[matchIdx] = { ...this.data[matchIdx], ...item };
+            updatedOrInserted.push(this.data[matchIdx]);
+          } else {
+            updatedOrInserted.push(this.data[matchIdx]);
+          }
+        } else {
+          const newItem = {
+            id: item.id || `${this.table}-${Math.random().toString(36).substr(2, 9)}`,
+            created_at: new Date().toISOString(),
+            ...item
+          };
+          this.data.push(newItem);
+          updatedOrInserted.push(newItem);
+        }
       }
+      setTable(this.table, this.data);
+      const output = Array.isArray(payload) ? updatedOrInserted : updatedOrInserted[0];
+      if (this._single) {
+        return { data: Array.isArray(output) ? output[0] || null : output, error: null };
+      }
+      return { data: output, error: null };
     }
-    setTable(this.table, this.data);
-    return { data: Array.isArray(payload) ? updatedOrInserted : updatedOrInserted[0], error: null };
+
+    return { data: null, error: new Error('Unknown query action') };
   }
 }
 

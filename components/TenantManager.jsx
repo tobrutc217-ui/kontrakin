@@ -1,7 +1,24 @@
 import React, { useState } from 'react';
 import { Pencil, Trash2, UserPlus, Save, DoorOpen, History } from 'lucide-react';
 import { supabase } from '../supabase';
-import { rupiah, today, parseDateLocal, roundDownTo1k } from '../utils';
+import { rupiah, today, parseDateLocal, roundDownTo1k, isoDate } from '../utils';
+
+const calculateLeaseDuration = (startStr, endStr) => {
+  if (!startStr || !endStr) return null;
+  const start = parseDateLocal(startStr);
+  const end = parseDateLocal(endStr);
+  if (isNaN(start.getTime()) || isNaN(end.getTime())) return null;
+  
+  const yearsDiff = end.getFullYear() - start.getFullYear();
+  const monthsDiff = end.getMonth() - start.getMonth();
+  const daysDiff = end.getDate() - start.getDate();
+  
+  let totalMonths = yearsDiff * 12 + monthsDiff;
+  if (daysDiff > 15) {
+    totalMonths += 1;
+  }
+  return totalMonths > 0 ? totalMonths : null;
+};
 
 export function TenantManager({ tenants, rooms, allRooms = [], properties = [], reload, notify }) {
   const [open, setOpen] = useState(false);
@@ -507,15 +524,52 @@ export function TenantManager({ tenants, rooms, allRooms = [], properties = [], 
                 )}
               </div>
             )}
-            <label htmlFor="tenant-lease-end">
-              Tanggal Keluar / Selesai (Opsional)
-              <input
-                id="tenant-lease-end"
-                type="date"
-                value={form.lease_end}
-                onChange={e => set('lease_end', e.target.value)}
-              />
-            </label>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4 col-span-full">
+              <label htmlFor="tenant-lease-duration">
+                Durasi Sewa / Kontrak (Pilihan Cepat)
+                <select
+                  id="tenant-lease-duration"
+                  value={(() => {
+                    if (!form.lease_end || !form.lease_start) return '';
+                    const dur = calculateLeaseDuration(form.lease_start, form.lease_end);
+                    if ([1, 3, 6, 12].includes(dur)) return String(dur);
+                    return 'custom';
+                  })()}
+                  onChange={e => {
+                    const dur = e.target.value;
+                    if (dur === '') {
+                      set('lease_end', '');
+                    } else if (dur !== 'custom' && form.lease_start) {
+                      const months = Number(dur);
+                      const start = parseDateLocal(form.lease_start);
+                      const end = new Date(start.getFullYear(), start.getMonth() + months, start.getDate());
+                      set('lease_end', isoDate(end));
+                    } else {
+                      // Kustom tanggal, biarkan seperti semula
+                    }
+                  }}
+                  disabled={!form.lease_start}
+                >
+                  <option value="">Sampai Keluar (Tanpa Batas)</option>
+                  <option value="1">1 Bulan</option>
+                  <option value="3">3 Bulan</option>
+                  <option value="6">6 Bulan</option>
+                  <option value="12">12 Bulan</option>
+                  <option value="custom">Kustom Tanggal</option>
+                </select>
+              </label>
+
+              <label htmlFor="tenant-lease-end">
+                Tanggal Keluar / Selesai (Opsional)
+                <input
+                  id="tenant-lease-end"
+                  type="date"
+                  value={form.lease_end}
+                  onChange={e => set('lease_end', e.target.value)}
+                  disabled={!form.lease_start}
+                />
+              </label>
+            </div>
           </div>
           <div className="form-actions mt-4">
             <button type="submit" className="primary" disabled={busy}>
@@ -551,7 +605,14 @@ export function TenantManager({ tenants, rooms, allRooms = [], properties = [], 
                   </small>
                 </div>
                 <span>{room ? getRoomLabel(room) : 'Belum ditempatkan'}</span>
-                <span>Tanggal {cycleDay} setiap bulan</span>
+                <div>
+                  <span>Tanggal {cycleDay} setiap bulan</span>
+                  {t.lease_end && (
+                    <small className="block text-gray-500 mt-0.5">
+                      📅 Kontrak: {calculateLeaseDuration(t.lease_start, t.lease_end) || '?'} Bulan (s.d. {new Intl.DateTimeFormat('id-ID', { day: 'numeric', month: 'long', year: 'numeric' }).format(parseDateLocal(t.lease_end))})
+                    </small>
+                  )}
+                </div>
                 <div className="row-actions">
                   {room && (
                     <button

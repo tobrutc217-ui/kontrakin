@@ -490,3 +490,119 @@ html[data-theme='dark'] .property-switcher select option {
   background: #282522 !important;
   color: #eee9e3 !important;
 }
+
+/* --- BULLETPROOF DARK MODE VISIBILITY FIX --- */
+html[data-theme='dark'] {
+  --text: #eee9e3 !important;
+  --bg: #1c1b1a !important;
+  --card: #292724 !important;
+  --panel: #292724 !important;
+  --border: #47423d !important;
+  --muted: #bcb5ae !important;
+  --accent: #eee9e3 !important;
+  --accent-soft: #3b3630 !important;
+  --accent-strong: #f1ede8 !important;
+  --surface: #292724 !important;
+  --surface-2: #211f1d !important;
+  --ink: #eee9e3 !important;
+  --line: #47423d !important;
+}
+
+html[data-theme='dark'] .edit-card,
+html[data-theme='dark'] .modal,
+html[data-theme='dark'] form {
+  color: #eee9e3 !important;
+}
+
+html[data-theme='dark'] .edit-card h3,
+html[data-theme='dark'] .modal h3,
+html[data-theme='dark'] .edit-card h4,
+html[data-theme='dark'] .modal h4 {
+  color: #f1ede8 !important;
+}
+
+html[data-theme='dark'] label,
+html[data-theme='dark'] .edit-card label,
+html[data-theme='dark'] .modal label,
+html[data-theme='dark'] .form-grid label {
+  color: #ddd6ce !important;
+}
+
+html[data-theme='dark'] input,
+html[data-theme='dark'] select,
+html[data-theme='dark'] textarea,
+html[data-theme='dark'] .edit-card input,
+html[data-theme='dark'] .edit-card select,
+html[data-theme='dark'] .edit-card textarea,
+html[data-theme='dark'] .modal input,
+html[data-theme='dark'] .modal select,
+html[data-theme='dark'] .modal textarea {
+  background: #211f1d !important;
+  color: #f1ede8 !important;
+  border-color: #514b45 !important;
+}
+
+html[data-theme='dark'] select option {
+  background: #211f1d !important;
+  color: #f1ede8 !important;
+}
+
+html[data-theme='dark'] .form-hint {
+  color: #bcb5ae !important;
+}
+
+html[data-theme='dark'] .billing-summary b,
+html[data-theme='dark'] .finance-summary b,
+html[data-theme='dark'] .billing-room-head b,
+html[data-theme='dark'] .billing-detail b,
+html[data-theme='dark'] .invoice-row b {
+  color: #f1ede8 !important;
+}
+
+html[data-theme='dark'] .billing-summary small,
+html[data-theme='dark'] .finance-summary span,
+html[data-theme='dark'] .billing-room-head small,
+html[data-theme='dark'] .billing-detail small,
+html[data-theme='dark'] .invoice-row small,
+html[data-theme='dark'] .muted {
+  color: #bcb5ae !important;
+}
+
+html[data-theme='dark'] .help-card,
+html[data-theme='dark'] .panel-heading p {
+  color: #bcb5ae !important;
+}
+
+/* Make sure help cards and descriptions stand out clearly and correctly */
+html[data-theme='dark'] #prorate-preview-box {
+  background: rgba(245, 158, 11, 0.08) !important;
+  border-color: rgba(245, 158, 11, 0.25) !important;
+}
+
+html[data-theme='dark'] #prorate-preview-box h4 {
+  color: #f59e0b !important;
+  border: none !important;
+  padding: 0 !important;
+  margin-bottom: 8px !important;
+}
+
+html[data-theme='dark'] #prorate-preview-box span {
+  color: #bcb5ae !important;
+}
+
+html[data-theme='dark'] #prorate-preview-box b {
+  color: #f1ede8 !important;
+}
+
+/* Billing Preview Dates Dark Theme override */
+html[data-theme='dark'] #billing-preview-dates {
+  background: rgba(59, 130, 246, 0.08) !important;
+  border-color: rgba(59, 130, 246, 0.25) !important;
+  color: #93c5fd !important;
+}
+
+html[data-theme='dark'] #billing-preview-dates span {
+  color: #93c5fd !important;
+  background: #211f1d !important;
+  border-color: #3b3f46 !important;
+}
