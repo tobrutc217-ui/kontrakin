@@ -129,8 +129,9 @@ function App({ user }) {
 
       if (rows.length) {
        const { error: upsertErr } = await supabase.from('invoices').upsert(rows, {
-  onConflict: 'tenant_id,due_date'
-});
+         onConflict: 'tenant_id,due_date',
+         ignoreDuplicates: true
+       });
         if (upsertErr) {
           console.warn('Gagal sync invoice otomatis:', upsertErr.message);
         }
