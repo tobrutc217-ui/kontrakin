@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useMemo } from 'react';
-import { Pencil, MessageCircle, CheckCircle2, X, Save, ReceiptText, AlertTriangle, Trash2, Check } from 'lucide-react';
+import { Pencil, MessageCircle, CheckCircle2, X, Save, ReceiptText, AlertTriangle, Trash2 } from 'lucide-react';
 import { supabase } from '../supabase';
 import { rupiah, today, parseDateLocal, overdueDays, addMonthsDate, monthDueDate } from '../utils';
 import { MoneyInput } from './MoneyInput';
@@ -11,7 +11,7 @@ export function InvoiceManager({ tenants, rooms, invoices, properties, reload, n
 
   // WhatsApp Message Modals
   const [messageOpen, setMessageOpen] = useState(false);
-  const [messageType, setMessageType] = useState('reminder'); // 'reminder' or 'receipt'
+  const [messageType, setMessageType] = useState('reminder');
   const [message, setMessage] = useState('');
   const [selectedGroup, setSelectedGroup] = useState(null);
 
@@ -20,10 +20,10 @@ export function InvoiceManager({ tenants, rooms, invoices, properties, reload, n
   const [paymentAmount, setPaymentAmount] = useState('');
 
   // Filtering Tabs
-  // 'pending' (Perlu Ditagih), 'contacted' (Sudah Ditagih), 'paid' (Lunas / Tidak Ada Tunggakan)
   const [activeTab, setActiveTab] = useState('pending');
 
-
+  // 🔥 HELPER: Parse angka dengan aman (menghapus titik/koma agar tidak jadi NaN)
+  const parseSafeNumber = (val) => Number(String(val || '').replace(/\D/g, '')) || 0;
 
   const defaultMonthPeriod = () => {
     const d = new Date();
@@ -79,9 +79,10 @@ export function InvoiceManager({ tenants, rooms, invoices, properties, reload, n
   }, [form.tenant_id, form.month_period, form.monthCount, tenants]);
 
   const roomFor = t => rooms.find(r => r.id === t?.room_id);
-  const remain = i => Math.max(0, Number(i.amount || 0) - Number(i.paid_amount || 0));
-  const autoAmount = t => Number(roomFor(t)?.monthly_rate || 0);
+  const remain = i => Math.max(0, parseSafeNumber(i.amount) - parseSafeNumber(i.paid_amount));
+  const autoAmount = t => parseSafeNumber(roomFor(t)?.monthly_rate);
 
+  // 🔥 SIMPAN TAGIHAN (DIPERBAIKI DENGAN TRY/CATCH & SAFE NUMBER)
   const saveInvoice = async e => {
     e.preventDefault();
     const t = tenants.find(x => x.id === form.tenant_id);
@@ -93,126 +94,91 @@ export function InvoiceManager({ tenants, rooms, invoices, properties, reload, n
 
     setBusy(true);
 
-    // Ambil seluruh invoice yang ada untuk tenant ini terlebih dahulu
-    // Ini agar jika ada invoice yang sudah ada pada tanggal jatuh tempo yang sama, kita bisa mengupdate nominalnya (amount)
-    // tanpa menimpa status lunas/pembayaran yang sudah dicicil (paid_amount).
-    const { data: existing, error: fetchErr } = await supabase
-      .from('invoices')
-      .select('*')
-      .eq('tenant_id', t.id);
+    try {
+      const { data: existing, error: fetchErr } = await supabase
+        .from('invoices')
+        .select('*')
+        .eq('tenant_id', t.id);
 
-    if (fetchErr) {
-      setBusy(false);
-      return notify('Gagal memeriksa data tagihan yang sudah ada: ' + fetchErr.message);
-    }
+      if (fetchErr) throw new Error(fetchErr.message);
 
-    const count = Math.max(1, Math.min(24, Number(form.monthCount) || 1));
-    const rows = [];
+      const count = Math.max(1, Math.min(24, Number(form.monthCount) || 1));
+      const rows = [];
 
-    if (editing) {
-      // Skenario Edit Satu Invoice Tertentu
-      const amount = form.manualAmount ? Number(form.amount) : autoAmount(t);
-      const paidAmount = Number(editing.paid_amount || 0);
-      const remainAmount = Math.max(0, amount - paidAmount);
-      
-      // Hitung status baru berdasarkan nominal baru dan sisa pembayaran
-      let newStatus = 'unpaid';
-      if (remainAmount === 0) {
-        newStatus = 'paid';
-      } else if (parseDateLocal(form.due_date) < parseDateLocal(today())) {
-        newStatus = 'overdue';
-      }
-
-      const result = await supabase.from('invoices')
-        .update({
-          due_date: form.due_date,
-          amount,
-          status: newStatus
-        })
-        .eq('id', editing.id);
-
-      setBusy(false);
-      if (result.error) {
-        return notify(result.error.message);
-      }
-
-      // Hapus dari daftar terhapus jika di-edit / di-re-create secara manual
-      try {
-        let deletedList = JSON.parse(localStorage.getItem('kos_deleted_invoices') || '[]');
-        const keyToClear = `${editing.tenant_id}::${form.due_date}`;
-        deletedList = deletedList.filter(k => k !== keyToClear);
-        localStorage.setItem('kos_deleted_invoices', JSON.stringify(deletedList));
-      } catch (e) {
-        console.warn(e);
-      }
-    } else {
-      // Skenario Pembuatan Tagihan Baru (Bisa Multi Bulan)
-      const clearedKeys = [];
-      for (let n = 0; n < count; n++) {
-        const due = addMonthsDate(form.due_date, n);
-        const amount = form.manualAmount ? Number(form.amount) : autoAmount(t);
-        clearedKeys.push(`${t.id}::${due}`);
+      if (editing) {
+        const amount = form.manualAmount ? parseSafeNumber(form.amount) : autoAmount(t);
+        const paidAmount = parseSafeNumber(editing.paid_amount);
+        const remainAmount = Math.max(0, amount - paidAmount);
         
-        // Cari apakah ada invoice yang sudah terbit di tanggal yang sama untuk tenant ini
-        const ext = (existing || []).find(i => i.due_date === due);
-        
-        if (ext) {
-          // Jika ada, kita TIMPA amount-nya, tetapi kita jaga paid_amount dan statusnya
-          const paidAmount = Number(ext.paid_amount || 0);
-          const remainAmount = Math.max(0, amount - paidAmount);
+        let newStatus = 'unpaid';
+        if (remainAmount === 0) newStatus = 'paid';
+        else if (parseDateLocal(form.due_date) < parseDateLocal(today())) newStatus = 'overdue';
+
+        const { error: updateErr } = await supabase.from('invoices')
+          .update({ due_date: form.due_date, amount, status: newStatus })
+          .eq('id', editing.id);
+
+        if (updateErr) throw new Error(updateErr.message);
+
+        try {
+          let deletedList = JSON.parse(localStorage.getItem('kos_deleted_invoices') || '[]');
+          const keyToClear = `${editing.tenant_id}::${form.due_date}`;
+          deletedList = deletedList.filter(k => k !== keyToClear);
+          localStorage.setItem('kos_deleted_invoices', JSON.stringify(deletedList));
+        } catch (e) { console.warn(e); }
+
+      } else {
+        const clearedKeys = [];
+        for (let n = 0; n < count; n++) {
+          const due = addMonthsDate(form.due_date, n);
+          const amount = form.manualAmount ? parseSafeNumber(form.amount) : autoAmount(t);
+          clearedKeys.push(`${t.id}::${due}`);
           
-          let newStatus = 'unpaid';
-          if (remainAmount === 0) {
-            newStatus = 'paid';
-          } else if (parseDateLocal(due) < parseDateLocal(today())) {
-            newStatus = 'overdue';
+          const ext = (existing || []).find(i => i.due_date === due);
+          
+          if (ext) {
+            const paidAmount = parseSafeNumber(ext.paid_amount);
+            const remainAmount = Math.max(0, amount - paidAmount);
+            let newStatus = 'unpaid';
+            if (remainAmount === 0) newStatus = 'paid';
+            else if (parseDateLocal(due) < parseDateLocal(today())) newStatus = 'overdue';
+
+            rows.push({ tenant_id: t.id, room_id: r.id, due_date: due, amount, status: newStatus, paid_amount: paidAmount });
+          } else {
+            rows.push({
+              tenant_id: t.id,
+              room_id: r.id,
+              due_date: due,
+              amount,
+              status: parseDateLocal(due) < parseDateLocal(today()) ? 'overdue' : 'unpaid',
+              paid_amount: 0
+            });
           }
-
-          rows.push({
-            tenant_id: t.id,
-            room_id: r.id,
-            due_date: due,
-            amount,
-            status: newStatus,
-            paid_amount: paidAmount
-          });
-        } else {
-          // Jika belum ada, buat baru dari nol
-          rows.push({
-            tenant_id: t.id,
-            room_id: r.id,
-            due_date: due,
-            amount,
-            status: parseDateLocal(due) < parseDateLocal(today()) ? 'overdue' : 'unpaid',
-            paid_amount: 0
-          });
         }
+
+        const { error: upsertErr } = await supabase.from('invoices').upsert(rows, {
+          onConflict: 'tenant_id,due_date'
+        });
+
+        if (upsertErr) throw new Error(upsertErr.message);
+
+        try {
+          let deletedList = JSON.parse(localStorage.getItem('kos_deleted_invoices') || '[]');
+          deletedList = deletedList.filter(k => !clearedKeys.includes(k));
+          localStorage.setItem('kos_deleted_invoices', JSON.stringify(deletedList));
+        } catch (e) { console.warn(e); }
       }
 
-      // Upsert ke database tanpa ignoreDuplicates agar data yang konflik ter-update dengan aman!
-      const result = await supabase.from('invoices').upsert(rows, {
-        onConflict: 'tenant_id,due_date'
-      });
-
+      setOpen(false);
+      setEditing(null);
+      notify(editing ? 'Tagihan berhasil diperbarui.' : `${count} periode tagihan berhasil ditambahkan.`);
+      reload();
+    } catch (err) {
+      console.error('Save Invoice Error:', err);
+      notify('Gagal menyimpan tagihan: ' + err.message);
+    } finally {
       setBusy(false);
-      if (result.error) {
-        return notify(result.error.message);
-      }
-
-      // Hapus seluruh kunci yang dibuat dari daftar terhapus
-      try {
-        let deletedList = JSON.parse(localStorage.getItem('kos_deleted_invoices') || '[]');
-        deletedList = deletedList.filter(k => !clearedKeys.includes(k));
-        localStorage.setItem('kos_deleted_invoices', JSON.stringify(deletedList));
-      } catch (e) {
-        console.warn(e);
-      }
     }
-
-    setOpen(false);
-    setEditing(null);
-    notify(editing ? 'Tagihan berhasil diperbarui.' : `${count} periode tagihan berhasil ditambahkan/diperbarui.`);
-    reload();
   };
 
   const editInvoice = i => {
@@ -239,11 +205,8 @@ export function InvoiceManager({ tenants, rooms, invoices, properties, reload, n
     setBusy(true);
     const { error } = await supabase.from('invoices').delete().eq('id', i.id);
     setBusy(false);
-    if (error) {
-      return notify('Gagal menghapus tagihan: ' + error.message);
-    }
+    if (error) return notify('Gagal menghapus tagihan: ' + error.message);
 
-    // Catat ke daftar terhapus agar tidak di-generate ulang otomatis
     try {
       const deletedList = JSON.parse(localStorage.getItem('kos_deleted_invoices') || '[]');
       const key = `${i.tenant_id}::${i.due_date}`;
@@ -251,70 +214,12 @@ export function InvoiceManager({ tenants, rooms, invoices, properties, reload, n
         deletedList.push(key);
         localStorage.setItem('kos_deleted_invoices', JSON.stringify(deletedList));
       }
-    } catch (e) {
-      console.warn('Gagal mencatat invoice terhapus:', e);
-    }
+    } catch (e) { console.warn('Gagal mencatat invoice terhapus:', e); }
 
     notify('Tagihan berhasil dihapus.');
     reload();
   };
 
-  const payInvoiceDirect = async i => {
-    const tName = tenants.find(t => t.id === i.tenant_id)?.full_name || 'Penghuni';
-    const periodLabel = new Intl.DateTimeFormat('id-ID', { month: 'long', year: 'numeric' }).format(parseDateLocal(i.due_date));
-    if (!window.confirm(`Apakah Anda yakin ingin menandai tagihan periode ${periodLabel} untuk ${tName} sebagai LUNAS?`)) {
-      return;
-    }
-    setBusy(true);
-    const now = new Date().toISOString();
-    const remainingAmount = remain(i);
-
-    // Update status to paid and set paid_amount to its full amount
-    const { error: invErr } = await supabase.from('invoices')
-      .update({
-        paid_amount: i.amount,
-        status: 'paid',
-        paid_at: now
-      })
-      .eq('id', i.id);
-
-    if (invErr) {
-      setBusy(false);
-      return notify('Gagal melunasi tagihan: ' + invErr.message);
-    }
-
-    // Record cash income transaction ONLY if remaining amount to be paid > 0
-    if (remainingAmount > 0) {
-      const room = rooms.find(r => r.id === i.room_id);
-      const property = properties.find(p => p.id === room?.property_id) || properties[0];
-      const propertyId = property?.id || i.property_id;
-
-      if (propertyId) {
-        const tx = {
-          property_id: propertyId,
-          invoice_id: i.id,
-          category: 'Sewa Kamar',
-          description: `Pembayaran ${tName} · Kamar ${room?.room_number || '-'} (Lunas - Instan)`,
-          amount: remainingAmount,
-          transaction_date: today()
-        };
-
-        const { error: txErr } = await supabase.from('transactions').insert(tx);
-        if (txErr) {
-          setBusy(false);
-          notify('Tagihan lunas, namun gagal mencatat transaksi keuangan: ' + txErr.message);
-          reload(); // Ensure UI reloads even if transaction insert fails
-          return;
-        }
-      }
-    }
-
-    setBusy(false);
-    notify(`Tagihan periode ${periodLabel} untuk ${tName} berhasil dilunasi.`);
-    reload();
-  };
-
-  // Group invoices by tenant and room for aggregated view
   const tenantGroups = useMemo(() => {
     const grouped = invoices.reduce((acc, i) => {
       const key = `${i.tenant_id}::${i.room_id}`;
@@ -328,43 +233,33 @@ export function InvoiceManager({ tenants, rooms, invoices, properties, reload, n
       acc[key].items.push(i);
       return acc;
     }, {});
-
     return Object.values(grouped).filter(g => g.tenant && g.room);
   }, [invoices, tenants, rooms]);
 
-  // Calculations for billing overview cards
   const unpaidInvoices = useMemo(() => invoices.filter(i => i.status !== 'paid'), [invoices]);
   const totalTunggakan = useMemo(() => unpaidInvoices.reduce((s, i) => s + remain(i), 0), [unpaidInvoices]);
-  
   const overdueInvoices = useMemo(() => unpaidInvoices.filter(i => overdueDays(i.due_date) > 0), [unpaidInvoices]);
   const totalTerlambat = useMemo(() => overdueInvoices.reduce((s, i) => s + remain(i), 0), [overdueInvoices]);
-
   const needToBillInvoices = useMemo(() => unpaidInvoices.filter(i => i.collection_status !== 'contacted'), [unpaidInvoices]);
   const totalNeedToBill = useMemo(() => needToBillInvoices.reduce((s, i) => s + remain(i), 0), [needToBillInvoices]);
-
   const alreadyBilledInvoices = useMemo(() => unpaidInvoices.filter(i => i.collection_status === 'contacted'), [unpaidInvoices]);
   const totalAlreadyBilled = useMemo(() => alreadyBilledInvoices.reduce((s, i) => s + remain(i), 0), [alreadyBilledInvoices]);
 
-  // Filter groups according to tabs
   const displayedGroups = useMemo(() => {
     return tenantGroups.filter(g => {
       const activeItems = g.items.filter(i => i.status !== 'paid');
       const outstandingSum = activeItems.reduce((s, i) => s + remain(i), 0);
 
       if (activeTab === 'pending') {
-        // Perlu ditagih: Outstanding > 0 and NOT fully contacted on all bills
         return outstandingSum > 0 && activeItems.some(i => i.collection_status !== 'contacted');
       } else if (activeTab === 'contacted') {
-        // Sudah ditagih: Outstanding > 0 and at least one bill marked contacted
         return outstandingSum > 0 && activeItems.every(i => i.collection_status === 'contacted');
       } else {
-        // Lunas: Outstanding === 0
         return outstandingSum === 0;
       }
     });
   }, [tenantGroups, activeTab]);
 
-  // Open payment recorder modal
   const openPayment = g => {
     const activeItems = g.items.filter(i => i.status !== 'paid');
     const totalOutstanding = activeItems.reduce((s, i) => s + remain(i), 0);
@@ -373,44 +268,33 @@ export function InvoiceManager({ tenants, rooms, invoices, properties, reload, n
     setPaymentOpen(true);
   };
 
-  // RECORD PAYMENT & FIFO ALLOCATION
   const recordPayment = async e => {
     e.preventDefault();
     const g = selectedGroup;
-    const amount = Number(paymentAmount);
+    const amount = parseSafeNumber(paymentAmount);
 
-    if (!g || amount <= 0) {
-      return notify('Harap masukkan nominal pembayaran yang valid.');
-    }
+    if (!g || amount <= 0) return notify('Harap masukkan nominal pembayaran yang valid.');
 
     let left = amount;
     const now = new Date().toISOString();
     setBusy(true);
 
-    // Filter unpaid items and sort by due_date ASC for FIFO
     const unpaidItemsSorted = [...g.items]
       .filter(i => i.status !== 'paid')
       .sort((a, b) => String(a.due_date).localeCompare(String(b.due_date)));
 
     for (const invoice of unpaidItemsSorted) {
       if (left <= 0) break;
-
       const outstanding = remain(invoice);
       const applied = Math.min(left, outstanding);
-
       if (applied <= 0) continue;
 
-      const newPaid = Number(invoice.paid_amount || 0) + applied;
-      const isLunas = newPaid >= Number(invoice.amount || 0);
+      const newPaid = parseSafeNumber(invoice.paid_amount) + applied;
+      const isLunas = newPaid >= parseSafeNumber(invoice.amount);
       const newStatus = isLunas ? 'paid' : (overdueDays(invoice.due_date) > 0 ? 'overdue' : 'unpaid');
 
-      // Update invoice
       const { error: invErr } = await supabase.from('invoices')
-        .update({
-          paid_amount: newPaid,
-          status: newStatus,
-          paid_at: isLunas ? now : null
-        })
+        .update({ paid_amount: newPaid, status: newStatus, paid_at: isLunas ? now : null })
         .eq('id', invoice.id);
 
       if (invErr) {
@@ -418,7 +302,6 @@ export function InvoiceManager({ tenants, rooms, invoices, properties, reload, n
         return notify(invErr.message);
       }
 
-      // Record transaction inside Keuangan linked to the specific property of the room
       const property = properties.find(p => p.id === g.room?.property_id) || properties[0];
       const tx = {
         property_id: property?.id,
@@ -437,7 +320,6 @@ export function InvoiceManager({ tenants, rooms, invoices, properties, reload, n
         reload();
         return notify('Sebagian pembayaran diperbarui, namun gagal mencatat transaksi keuangan: ' + txErr.message);
       }
-
       left -= applied;
     }
 
@@ -446,18 +328,17 @@ export function InvoiceManager({ tenants, rooms, invoices, properties, reload, n
     setPaymentAmount('');
     reload();
 
-    // Sisa kembalian check
-    const change = left;
-    const totalPaidActual = amount - change;
+    const totalPaidActual = amount - left;
     notify(`Pembayaran sebesar ${rupiah(totalPaidActual)} berhasil dicatat.`);
 
-    // If fully or partially paid, open a confirmation receipt modal to send over WA!
     setMessageType('paid');
     setMessage(buildPaidMessage(g, totalPaidActual));
     setMessageOpen(true);
   };
 
-  // BUILD WHATSAPP MESSAGE TEXT FOR PENAGIHAN (TUNGGAKAN > 0)
+  // ==========================================
+  // PESAN WHATSAPP (TIDAK DIUBAH SAMA SEKALI)
+  // ==========================================
   const buildPenagihanMessage = g => {
     const prop = properties.find(p => p.id === g.room?.property_id) || properties[0];
     const unpaidItems = g.items
@@ -472,8 +353,6 @@ export function InvoiceManager({ tenants, rooms, invoices, properties, reload, n
     }).join('\n');
 
     const totalOutstandingSum = unpaidItems.reduce((s, i) => s + remain(i), 0);
-
-    // Bank credentials Milik Properti
     const paymentText = [
       prop?.payment_bca && `BCA: ${prop.payment_bca}`,
       prop?.payment_dana && `DANA: ${prop.payment_dana}`,
@@ -481,7 +360,6 @@ export function InvoiceManager({ tenants, rooms, invoices, properties, reload, n
       prop?.payment_name && `a.n. ${prop.payment_name}`
     ].filter(Boolean).join('\n') || 'BCA: 0571288191\nDANA: 08816585970\nGoPay / ShopeePay: 085161174317\na.n. Ryan Putra Pratama';
 
-    // Check if the tenant has partial payments already on these active bills
     const totalBillOriginal = unpaidItems.reduce((s, i) => s + Number(i.amount || 0), 0);
     const totalAlreadyPaid = unpaidItems.reduce((s, i) => s + Number(i.paid_amount || 0), 0);
 
@@ -509,10 +387,8 @@ ${paymentText}
 Mohon segera melakukan konfirmasi jika sudah membayar. Terima kasih banyak 🙏`;
   };
 
-  // BUILD WHATSAPP MESSAGE TEXT FOR KONFIRMASI LUNAS
   const buildPaidMessage = (g, paidAmount) => {
     const prop = properties.find(p => p.id === g.room?.property_id) || properties[0];
-    const currentMonthLabel = new Intl.DateTimeFormat('id-ID', { month: 'long', year: 'numeric' }).format(parseDateLocal(today()));
     const remainingOutstanding = g.items.filter(i => i.status !== 'paid').reduce((s, i) => s + remain(i), 0);
 
     return `Halo ${g.tenant?.full_name || ''},
@@ -549,25 +425,17 @@ Terima kasih 🙏`;
     if (!t?.whatsapp_number || t.whatsapp_number.trim() === '') {
       return notify('Nomor WhatsApp tidak tersedia atau tidak valid.');
     }
-
-    // Clean phone number from non-digits
     const cleanNumber = t.whatsapp_number.replace(/\D/g, '');
-    if (!cleanNumber) {
-      return notify('Nomor WhatsApp tidak valid.');
-    }
+    if (!cleanNumber) return notify('Nomor WhatsApp tidak valid.');
 
     const waUrl = `https://wa.me/${cleanNumber}?text=${encodeURIComponent(message)}`;
     window.open(waUrl, '_blank', 'noopener,noreferrer');
 
-    // Mark as contacted in DB if we sent a billing reminder
     if (messageType === 'reminder') {
       const activeIds = selectedGroup.items.filter(i => i.status !== 'paid').map(i => i.id);
       if (activeIds.length) {
         await supabase.from('invoices')
-          .update({
-            collection_status: 'contacted',
-            last_contacted_at: new Date().toISOString()
-          })
+          .update({ collection_status: 'contacted', last_contacted_at: new Date().toISOString() })
           .in('id', activeIds);
         reload();
       }
@@ -575,81 +443,79 @@ Terima kasih 🙏`;
     setMessageOpen(false);
   };
 
+  // ==========================================
+  // UI DENGAN DUKUNGAN LIGHT & DARK MODE
+  // ==========================================
   return (
-    <section className="module-full" id="billing-manager">
-      <div className="module-toolbar">
+    <section className="module-full text-gray-900 dark:text-gray-100" id="billing-manager">
+      <div className="module-toolbar flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4 mb-6">
         <div>
-          <h2>Manajemen Penagihan & Billing</h2>
-          <p>Kirim tagihan otomatis, catat pembayaran sebagian FIFO, dan koordinasikan via WhatsApp.</p>
+          <h2 className="text-2xl font-bold text-gray-900 dark:text-white">Manajemen Penagihan & Billing</h2>
+          <p className="text-sm text-gray-500 dark:text-gray-400 mt-1">Kirim tagihan otomatis, catat pembayaran sebagian FIFO, dan koordinasikan via WhatsApp.</p>
         </div>
-        <div className="toolbar-actions">
-          <button
-            className="add-button"
-            type="button"
-            onClick={() => {
-              setEditing(null);
-              const nowYm = (() => {
-                const d = new Date();
-                return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
-              })();
-              setForm({
-                tenant_id: '',
-                due_date: today(),
-                amount: '',
-                manualAmount: false,
-                monthCount: 1,
-                month_period: nowYm
-              });
-              setOpen(true);
-            }}
-          >
-            <ReceiptText size={17} /> Buat Tagihan Baru
-          </button>
-        </div>
+        <button
+          className="inline-flex items-center gap-2 px-4 py-2.5 bg-blue-600 hover:bg-blue-700 text-white font-medium rounded-lg transition-colors shadow-sm"
+          type="button"
+          onClick={() => {
+            setEditing(null);
+            setForm({ tenant_id: '', due_date: today(), amount: '', manualAmount: false, monthCount: 1, month_period: defaultMonthPeriod() });
+            setOpen(true);
+          }}
+        >
+          <ReceiptText size={18} /> Buat Tagihan Baru
+        </button>
       </div>
 
       {/* Summary Cards */}
-      <div className="billing-summary" id="billing-summary">
-        <div>
-          <small>Total Tunggakan</small>
-          <b>{rupiah(totalTunggakan)}</b>
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 mb-6" id="billing-summary">
+        <div className="bg-white dark:bg-gray-800 p-4 rounded-xl border border-gray-200 dark:border-gray-700 shadow-sm">
+          <small className="text-xs font-semibold text-gray-500 dark:text-gray-400 uppercase tracking-wider">Total Tunggakan</small>
+          <b className="block text-xl mt-1 text-gray-900 dark:text-white">{rupiah(totalTunggakan)}</b>
         </div>
-        <div>
-          <small>Perlu Ditagih</small>
-          <b>{rupiah(totalNeedToBill)}</b>
+        <div className="bg-white dark:bg-gray-800 p-4 rounded-xl border border-gray-200 dark:border-gray-700 shadow-sm">
+          <small className="text-xs font-semibold text-gray-500 dark:text-gray-400 uppercase tracking-wider">Perlu Ditagih</small>
+          <b className="block text-xl mt-1 text-blue-600 dark:text-blue-400">{rupiah(totalNeedToBill)}</b>
         </div>
-        <div>
-          <small>Sudah Ditagih</small>
-          <b>{rupiah(totalAlreadyBilled)}</b>
+        <div className="bg-white dark:bg-gray-800 p-4 rounded-xl border border-gray-200 dark:border-gray-700 shadow-sm">
+          <small className="text-xs font-semibold text-gray-500 dark:text-gray-400 uppercase tracking-wider">Sudah Ditagih</small>
+          <b className="block text-xl mt-1 text-yellow-600 dark:text-yellow-400">{rupiah(totalAlreadyBilled)}</b>
         </div>
-        <div>
-          <small>Nilai Terlambat</small>
-          <b className="text-red-500">{rupiah(totalTerlambat)}</b>
+        <div className="bg-white dark:bg-gray-800 p-4 rounded-xl border border-gray-200 dark:border-gray-700 shadow-sm">
+          <small className="text-xs font-semibold text-gray-500 dark:text-gray-400 uppercase tracking-wider">Nilai Terlambat</small>
+          <b className="block text-xl mt-1 text-red-600 dark:text-red-400">{rupiah(totalTerlambat)}</b>
         </div>
       </div>
 
       {/* Filter Tabs */}
-      <div className="billing-filter" id="billing-tab-filters">
-        <button className={activeTab === 'pending' ? 'active' : ''} onClick={() => setActiveTab('pending')}>
-          Perlu Ditagih ({needToBillInvoices.length})
-        </button>
-        <button className={activeTab === 'contacted' ? 'active' : ''} onClick={() => setActiveTab('contacted')}>
-          Sudah Ditagih ({alreadyBilledInvoices.length})
-        </button>
-        <button className={activeTab === 'paid' ? 'active' : ''} onClick={() => setActiveTab('paid')}>
-          Lunas / Bebas Tunggakan
-        </button>
+      <div className="flex space-x-1 mb-6 border-b border-gray-200 dark:border-gray-700 overflow-x-auto" id="billing-tab-filters">
+        {[
+          { id: 'pending', label: 'Perlu Ditagih', count: needToBillInvoices.length },
+          { id: 'contacted', label: 'Sudah Ditagih', count: alreadyBilledInvoices.length },
+          { id: 'paid', label: 'Lunas / Bebas Tunggakan', count: invoices.filter(i => i.status === 'paid').length }
+        ].map(tab => (
+          <button
+            key={tab.id}
+            className={`px-4 py-2.5 text-sm font-medium rounded-t-lg transition-colors whitespace-nowrap ${
+              activeTab === tab.id
+                ? 'bg-white dark:bg-gray-800 text-blue-600 dark:text-blue-400 border-b-2 border-blue-600 dark:border-blue-400'
+                : 'text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-800'
+            }`}
+            onClick={() => setActiveTab(tab.id)}
+          >
+            {tab.label} ({tab.count})
+          </button>
+        ))}
       </div>
 
       {/* Manual Billing Creator Form */}
       {open && (
-         <form className="edit-card" onSubmit={saveInvoice} id="billing-form">
-          <h3>{editing ? 'Edit Tagihan' : 'Buat Tagihan Manual Baru'}</h3>
-          <div className="form-grid">
-            <label htmlFor="invoice-tenant">
-              Pilih Penghuni
+        <form className="bg-white dark:bg-gray-800 p-6 rounded-xl shadow-sm border border-gray-200 dark:border-gray-700 mb-6" onSubmit={saveInvoice} id="billing-form">
+          <h3 className="text-lg font-semibold mb-4 text-gray-900 dark:text-white">{editing ? 'Edit Tagihan' : 'Buat Tagihan Manual Baru'}</h3>
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-4">
+            <label className="block">
+              <span className="text-sm font-medium text-gray-700 dark:text-gray-300">Pilih Penghuni</span>
               <select
-                id="invoice-tenant"
+                className="w-full mt-1 rounded-lg border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-900 px-3 py-2 text-sm text-gray-900 dark:text-gray-100 focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none transition-all"
                 value={form.tenant_id}
                 onChange={e => {
                   const tenantId = e.target.value;
@@ -667,40 +533,30 @@ Terima kasih 🙏`;
                 <option value="">Pilih penghuni</option>
                 {tenants.filter(t => t.room_id).map(t => {
                   const r = rooms.find(room => room.id === t.room_id);
-                  return (
-                    <option key={t.id} value={t.id}>
-                      {t.full_name} (Kamar {r?.room_number || '-'})
-                    </option>
-                  );
+                  return <option key={t.id} value={t.id}>{t.full_name} (Kamar {r?.room_number || '-'})</option>;
                 })}
               </select>
             </label>
 
             {!editing ? (
               <>
-                <label htmlFor="invoice-period">
-                  Bulan Periode Mulai
+                <label className="block">
+                  <span className="text-sm font-medium text-gray-700 dark:text-gray-300">Bulan Periode Mulai</span>
                   <input
-                    id="invoice-period"
+                    className="w-full mt-1 rounded-lg border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-900 px-3 py-2 text-sm text-gray-900 dark:text-gray-100 focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none transition-all"
                     type="month"
                     value={form.month_period}
                     onChange={e => {
                       const ym = e.target.value;
-                      const calculatedDue = getCalculatedDueDate(form.tenant_id, ym);
-                      setForm(f => ({
-                        ...f,
-                        month_period: ym,
-                        due_date: calculatedDue
-                      }));
+                      setForm(f => ({ ...f, month_period: ym, due_date: getCalculatedDueDate(f.tenant_id, ym) }));
                     }}
                     required
                   />
                 </label>
-
-                <label htmlFor="invoice-count">
-                  Jumlah Bulan / Periode Berurutan
+                <label className="block">
+                  <span className="text-sm font-medium text-gray-700 dark:text-gray-300">Jumlah Bulan Berurutan</span>
                   <input
-                    id="invoice-count"
+                    className="w-full mt-1 rounded-lg border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-900 px-3 py-2 text-sm text-gray-900 dark:text-gray-100 focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none transition-all"
                     type="number"
                     min="1"
                     max="24"
@@ -711,10 +567,10 @@ Terima kasih 🙏`;
                 </label>
               </>
             ) : (
-              <label htmlFor="invoice-due">
-                Tanggal Jatuh Tempo
+              <label className="block">
+                <span className="text-sm font-medium text-gray-700 dark:text-gray-300">Tanggal Jatuh Tempo</span>
                 <input
-                  id="invoice-due"
+                  className="w-full mt-1 rounded-lg border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-900 px-3 py-2 text-sm text-gray-900 dark:text-gray-100 focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none transition-all"
                   type="date"
                   value={form.due_date}
                   onChange={e => set('due_date', e.target.value)}
@@ -723,37 +579,35 @@ Terima kasih 🙏`;
               </label>
             )}
 
-            <label htmlFor="invoice-amount" className="flex flex-col">
-              <span className="flex justify-between items-center">
+            <label className="block md:col-span-3 lg:col-span-1">
+              <span className="flex justify-between items-center text-sm font-medium text-gray-700 dark:text-gray-300">
                 Nominal Tagihan
                 <button
                   type="button"
-                  className="text-xs text-blue-500 font-normal underline hover:text-blue-600"
+                  className="text-xs text-blue-600 dark:text-blue-400 font-normal underline hover:text-blue-800 dark:hover:text-blue-300"
                   onClick={() => set('manualAmount', !form.manualAmount)}
                 >
                   {form.manualAmount ? 'Gunakan Tarif Kamar Otomatis' : 'Ubah Nominal Kustom'}
                 </button>
               </span>
-              <MoneyInput
-                id="invoice-amount"
-                value={form.amount}
-                onChange={val => {
-                  set('amount', val);
-                  set('manualAmount', true);
-                }}
-                required
-              />
+              <div className="mt-1">
+                <MoneyInput
+                  value={form.amount}
+                  onChange={val => { set('amount', val); set('manualAmount', true); }}
+                  required
+                />
+             . </div>
             </label>
           </div>
 
           {previewDates.length > 0 && (
-            <div className="mt-3 text-xs text-blue-800 bg-blue-50 border border-blue-200 p-3 rounded" id="billing-preview-dates">
-              <span className="font-semibold block mb-1">📅 Rencana Tanggal Jatuh Tempo ({previewDates.length} Bulan):</span>
-              <div className="flex flex-wrap gap-1">
+            <div className="mt-4 text-xs text-blue-800 dark:text-blue-200 bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800 p-3 rounded-lg">
+              <span className="font-semibold block mb-2">📅 Rencana Tanggal Jatuh Tempo ({previewDates.length} Bulan):</span>
+              <div className="flex flex-wrap gap-2">
                 {previewDates.map(d => {
-                  const formatted = new Intl.DateTimeFormat('id-ID', { day: 'numeric', month: 'long', year: 'numeric' }).format(parseDateLocal(d));
+                  const formatted = new Intl.DateTimeFormat('id-ID', { day: 'numeric', month: 'short', year: 'numeric' }).format(parseDateLocal(d));
                   return (
-                    <span key={d} className="bg-white border text-blue-700 px-2 py-0.5 rounded text-[11px] font-medium shadow-sm">
+                    <span key={d} className="bg-white dark:bg-gray-800 border border-blue-200 dark:border-blue-700 text-blue-700 dark:text-blue-300 px-2.5 py-1 rounded-md text-xs font-medium shadow-sm">
                       {formatted}
                     </span>
                   );
@@ -762,15 +616,15 @@ Terima kasih 🙏`;
             </div>
           )}
 
-          <p className="form-hint">
-            Tagihan bulanan normal selalu memakai tarif kamar penuh. Jika tanggal tagihan berubah, lakukan perubahan siklus tanggal di menu Penghuni untuk menghitung prorata khusus pindah tanggal secara formal.
+          <p className="text-xs text-gray-500 dark:text-gray-400 mt-4 mb-4">
+            Tagihan bulanan normal selalu memakai tarif kamar penuh. Jika tanggal tagihan berubah, lakukan perubahan siklus tanggal di menu Penghuni untuk menghitung prorata khusus.
           </p>
 
-          <div className="form-actions mt-4">
-            <button type="submit" className="primary" disabled={busy}>
-              <Save size={15} /> Simpan Tagihan
+          <div className="flex items-center gap-3 pt-4 border-t border-gray-100 dark:border-gray-700">
+            <button type="submit" className="inline-flex items-center gap-2 px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white font-medium rounded-lg transition-colors disabled:opacity-50" disabled={busy}>
+              <Save size={16} /> {editing ? 'Perbarui Tagihan' : 'Simpan Tagihan'}
             </button>
-            <button type="button" onClick={() => { setOpen(false); setEditing(null); }}>
+            <button type="button" className="px-4 py-2 text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700 font-medium rounded-lg transition-colors" onClick={() => { setOpen(false); setEditing(null); }}>
               Batal
             </button>
           </div>
@@ -779,81 +633,102 @@ Terima kasih 🙏`;
 
       {/* Bills Group List */}
       {displayedGroups.length === 0 ? (
-        <div className="empty panel">Tidak ada data penagihan yang cocok dengan filter ini.</div>
+        <div className="text-center py-12 bg-white dark:bg-gray-800 rounded-xl border border-dashed border-gray-300 dark:border-gray-700">
+          <p className="text-gray-500 dark:text-gray-400">Tidak ada data penagihan yang cocok dengan filter ini.</p>
+        </div>
       ) : (
-        <div className="billing-room-list" id="billing-room-list">
+        <div className="space-y-4" id="billing-room-list">
           {displayedGroups.map(g => {
             const activeItems = g.items.filter(i => i.status !== 'paid');
             const totalOutstandingSum = activeItems.reduce((s, i) => s + remain(i), 0);
             const hasOverdue = activeItems.some(i => overdueDays(i.due_date) > 0);
+            const isPaidGroup = totalOutstandingSum === 0;
             
             return (
               <div
-                className={`billing-room-card ${totalOutstandingSum > 0 ? (hasOverdue ? 'is-overdue' : 'is-pending') : 'is-paid'}`}
                 key={`${g.tenant?.id}-${g.room?.id}`}
+                className={`bg-white dark:bg-gray-800 rounded-xl shadow-sm border overflow-hidden transition-all hover:shadow-md ${
+                  isPaidGroup 
+                    ? 'border-green-200 dark:border-green-900/50' 
+                    : hasOverdue 
+                      ? 'border-red-200 dark:border-red-900/50' 
+                      : 'border-gray-200 dark:border-gray-700'
+                }`}
               >
-                <div className="billing-room-head">
+                <div className={`p-4 border-b border-gray-100 dark:border-gray-700 flex flex-col sm:flex-row sm:justify-between sm:items-center gap-3 ${isPaidGroup ? 'bg-green-50/50 dark:bg-green-900/10' : hasOverdue ? 'bg-red-50/50 dark:bg-red-900/10' : ''}`}>
                   <div>
-                    <b>Kamar {g.room?.room_number || '-'} · {g.tenant?.full_name || 'Penghuni'}</b>
-                    <small>
-                      {totalOutstandingSum > 0
-                        ? `${activeItems.length} bulan belum lunas · ${hasOverdue ? 'Ada tunggakan terlambat' : 'Menunggu jatuh tempo'}`
-                        : 'Lunas / Tidak ada tunggakan sewa aktif'}
+                    <div className="flex items-center gap-2">
+                      <b className="text-base text-gray-900 dark:text-white">Kamar {g.room?.room_number || '-'} · {g.tenant?.full_name || 'Penghuni'}</b>
+                      {hasOverdue && !isPaidGroup && <span className="px-2 py-0.5 text-xs font-semibold bg-red-100 dark:bg-red-900/30 text-red-700 dark:text-red-300 rounded-full">Terlambat</span>}
+                    </div>
+                    <small className={`text-sm mt-1 block ${isPaidGroup ? 'text-green-600 dark:text-green-400' : 'text-gray-500 dark:text-gray-400'}`}>
+                      {isPaidGroup ? 'Lunas / Tidak ada tunggakan sewa aktif' : `${activeItems.length} bulan belum lunas`}
                     </small>
                   </div>
-                  <strong>{rupiah(totalOutstandingSum)}</strong>
+                  <strong className={`text-xl ${isPaidGroup ? 'text-green-600 dark:text-green-400' : 'text-gray-900 dark:text-white'}`}>
+                    {rupiah(totalOutstandingSum)}
+                  </strong>
                 </div>
 
-                {/* Sub items list */}
                 {activeItems.length > 0 && (
-                  <div className="billing-details">
-                    {activeItems
-                      .sort((a, b) => String(a.due_date).localeCompare(String(b.due_date)))
-                      .map(invoice => {
-                        const daysLate = overdueDays(invoice.due_date);
-                        return (
-                          <div className="billing-detail" key={invoice.id}>
-                            <span>
+                  <div className="divide-y divide-gray-100 dark:divide-gray-700">
+                    {activeItems.sort((a, b) => String(a.due_date).localeCompare(String(b.due_date))).map(invoice => {
+                      const daysLate = overdueDays(invoice.due_date);
+                      const isPartial = parseSafeNumber(invoice.paid_amount) > 0;
+                      
+                      return (
+                        <div key={invoice.id} className="p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-4 hover:bg-gray-50 dark:hover:bg-gray-700/30 transition-colors">
+                          <div className="flex-1 min-w-0">
+                            <div className="font-medium text-gray-900 dark:text-gray-100">
                               {new Intl.DateTimeFormat('id-ID', { month: 'long', year: 'numeric' }).format(parseDateLocal(invoice.due_date))}
-                            </span>
-                            <b>{rupiah(remain(invoice))}</b>
-                            <small>
-                              {Number(invoice.paid_amount || 0) > 0
-                                ? `Dibayar sebagian: ${rupiah(invoice.paid_amount)}`
-                                : invoice.collection_status === 'contacted'
-                                ? 'Sudah diingatkan'
-                                : daysLate > 0
-                                ? `Terlambat ${daysLate} hari`
-                                : 'Menunggu'}
-                            </small>
+                            </div>
+                            <div className="text-xs text-gray-500 dark:text-gray-400 mt-1">
+                              {isPartial ? (
+                                <span className="text-blue-600 dark:text-blue-400 font-medium">Dibayar sebagian: {rupiah(invoice.paid_amount)}</span>
+                              ) : invoice.collection_status === 'contacted' ? (
+                                <span className="text-yellow-600 dark:text-yellow-400">Sudah diingatkan</span>
+                              ) : daysLate > 0 ? (
+                                <span className="text-red-600 dark:text-red-400 font-medium">Terlambat {daysLate} hari</span>
+                              ) : (
+                                <span>Menunggu jatuh tempo</span>
+                              )}
+                            </div>
+                          </div>
+                          
+                          <div className="flex items-center gap-4 sm:gap-6">
+                            <div className="text-right min-w-[100px]">
+                              <div className="font-bold text-gray-900 dark:text-gray-100">{rupiah(remain(invoice))}</div>
+                              {isPartial && <div className="text-xs text-gray-400 dark:text-gray-500 line-through">{rupiah(invoice.amount)}</div>}
+                            </div>
+                            
                             <div className="flex items-center gap-1">
-                              <button type="button" onClick={() => editInvoice(invoice)} title="Edit Tagihan" className="p-1 hover:bg-gray-100 rounded">
-                                <Pencil size={13} />
+                              <button type="button" onClick={() => editInvoice(invoice)} title="Edit Tagihan" className="p-2 text-gray-500 hover:text-blue-600 hover:bg-blue-50 dark:hover:bg-blue-900/30 dark:hover:text-blue-400 rounded-lg transition-colors">
+                                <Pencil size={16} />
                               </button>
-                              <button type="button" onClick={() => deleteInvoice(invoice)} title="Hapus Tagihan" className="p-1 hover:bg-red-50 text-red-500 rounded">
-                                <Trash2 size={13} />
+                              <button type="button" onClick={() => deleteInvoice(invoice)} title="Hapus Tagihan" className="p-2 text-gray-500 hover:text-red-600 hover:bg-red-50 dark:hover:bg-red-900/30 dark:hover:text-red-400 rounded-lg transition-colors">
+                                <Trash2 size={16} />
                               </button>
                             </div>
                           </div>
-                        );
-                      })}
+                        </div>
+                      );
+                    })}
                   </div>
                 )}
 
-                {/* Action Controls based on Outstanding status */}
-                <div className="billing-room-actions">
+                <div className="p-4 bg-gray-50 dark:bg-gray-800/50 border-t border-gray-100 dark:border-gray-700 flex flex-wrap gap-3 justify-end">
                   {totalOutstandingSum > 0 ? (
                     <>
-                      <button className="primary" type="button" onClick={() => openMessage(g, 'reminder')}>
-                        <MessageCircle size={15} /> Kirim WA Penagihan
+                      <button className="inline-flex items-center gap-2 px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white text-sm font-medium rounded-lg transition-colors shadow-sm" type="button" onClick={() => openMessage(g, 'reminder')}>
+                        <MessageCircle size={16} /> Kirim WA Penagihan
                       </button>
-                      <button className="secondary-button" type="button" onClick={() => openPayment(g)}>
-                        <CheckCircle2 size={15} /> Catat Pembayaran
+                      <button className="inline-flex items-center gap-2 px-4 py-2 bg-white dark:bg-gray-700 border border-gray-300 dark:border-gray-600 hover:bg-gray-50 dark:hover:bg-gray-600 text-gray-700 dark:text-gray-200 text-sm font-medium rounded-lg transition-colors shadow-sm" type="button" onClick={() => openPayment(g)}>
+                        <CheckCircle2 size={16} /> Catat Pembayaran
                       </button>
                     </>
                   ) : (
-                    <button className="success-button" type="button" onClick={() => openMessage(g, 'receipt')}>
-                      <CheckCircle2 size={15} /> Kirim WA Konfirmasi Lunas
+                    <button className="inline-flex items-center gap-2 px-4 py-2 bg-green-600 hover:bg-green-700 text-white text-sm font-medium rounded-lg transition-colors shadow-sm" type="button" onClick={() => openMessage(g, 'receipt')}>
+                      <CheckCircle2 size={16} /> Kirim WA Konfirmasi Lunas
                     </button>
                   )}
                 </div>
@@ -863,42 +738,37 @@ Terima kasih 🙏`;
         </div>
       )}
 
-
-
       {/* Record Payment Modal */}
       {paymentOpen && selectedGroup && (
-        <div className="modal-backdrop">
-          <form className="modal" onSubmit={recordPayment} id="record-payment-modal">
-            <button type="button" className="modal-close" onClick={() => setPaymentOpen(false)}>
-              <X />
-            </button>
-            <h3>Catat Penerimaan Pembayaran</h3>
-            <p className="text-sm mb-4">
-              Penghuni: <b>{selectedGroup.tenant?.full_name}</b> · Kamar <b>{selectedGroup.room?.room_number}</b>
+        <div className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center z-50 p-4">
+          <form className="bg-white dark:bg-gray-800 w-full max-w-md rounded-xl shadow-xl border border-gray-200 dark:border-gray-700 p-6" onSubmit={recordPayment} id="record-payment-modal">
+            <div className="flex justify-between items-center mb-4">
+              <h3 className="text-lg font-semibold text-gray-900 dark:text-white">Catat Penerimaan Pembayaran</h3>
+              <button type="button" className="text-gray-400 hover:text-gray-600 dark:hover:text-gray-200" onClick={() => setPaymentOpen(false)}>
+                <X size={20} />
+              </button>
+            </div>
+            <p className="text-sm text-gray-600 dark:text-gray-300 mb-4">
+              Penghuni: <b className="text-gray-900 dark:text-white">{selectedGroup.tenant?.full_name}</b> · Kamar <b className="text-gray-900 dark:text-white">{selectedGroup.room?.room_number}</b>
             </p>
 
-            <label htmlFor="payout-amount">
-              Nominal yang Diterima (IDR)
-              <MoneyInput
-                id="payout-amount"
-                value={paymentAmount}
-                onChange={setPaymentAmount}
-                required
-              />
+            <label className="block mb-4">
+              <span className="text-sm font-medium text-gray-700 dark:text-gray-300 mb-1 block">Nominal yang Diterima (IDR)</span>
+              <MoneyInput value={paymentAmount} onChange={setPaymentAmount} required />
             </label>
 
-            <div className="alert-notice flex items-start gap-2 bg-blue-50 border border-blue-200 p-3 rounded text-xs text-blue-800 mt-3">
-              <AlertTriangle size={16} className="shrink-0 text-blue-500" />
+            <div className="flex items-start gap-3 bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800 p-3 rounded-lg text-xs text-blue-800 dark:text-blue-200 mb-6">
+              <AlertTriangle size={16} className="shrink-0 mt-0.5 text-blue-600 dark:text-blue-400" />
               <span>
-                <b>Alokasi Otomatis (FIFO):</b> Sistem akan otomatis membagi pembayaran ini untuk melunasi tagihan yang paling lama/tertua terlebih dahulu. Sebagian sisa pembayaran yang tidak melunasi invoice penuh akan tercatat sebagai pembayaran sebagian (partial) pada periode berikutnya.
+                <b>Alokasi Otomatis (FIFO):</b> Sistem akan otomatis membagi pembayaran ini untuk melunasi tagihan yang paling lama/tertua terlebih dahulu. Sebagian sisa pembayaran yang tidak melunasi invoice penuh akan tercatat sebagai pembayaran sebagian (partial).
               </span>
             </div>
 
-            <div className="form-actions mt-4">
-              <button type="submit" className="primary" disabled={busy}>
-                <CheckCircle2 size={15} /> Konfirmasi & Simpan Pembayaran
+            <div className="flex items-center gap-3 justify-end">
+              <button type="submit" className="inline-flex items-center gap-2 px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white font-medium rounded-lg transition-colors disabled:opacity-50" disabled={busy}>
+                <CheckCircle2 size={16} /> Konfirmasi & Simpan
               </button>
-              <button type="button" onClick={() => setPaymentOpen(false)}>
+              <button type="button" className="px-4 py-2 text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700 font-medium rounded-lg transition-colors" onClick={() => setPaymentOpen(false)}>
                 Batal
               </button>
             </div>
@@ -908,28 +778,30 @@ Terima kasih 🙏`;
 
       {/* WA Preview Modal */}
       {messageOpen && selectedGroup && (
-        <div className="modal-backdrop">
-          <div className="modal" id="whatsapp-preview-modal">
-            <button type="button" className="modal-close" onClick={() => setMessageOpen(false)}>
-              <X />
-            </button>
-            <h3>
-              {messageType === 'paid' ? 'Pratinjau Konfirmasi Lunas' : 'Pratinjau Penagihan WhatsApp'}
-            </h3>
-            <p className="text-xs text-gray-500 mb-2">
-              Pesan di bawah siap dikirimkan ke nomor WhatsApp penghuni: <b>{selectedGroup.tenant?.whatsapp_number || 'Tidak ada nomor'}</b>
+        <div className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center z-50 p-4">
+          <div className="bg-white dark:bg-gray-800 w-full max-w-lg rounded-xl shadow-xl border border-gray-200 dark:border-gray-700 p-6">
+            <div className="flex justify-between items-center mb-4">
+              <h3 className="text-lg font-semibold text-gray-900 dark:text-white">
+                {messageType === 'paid' ? 'Pratinjau Konfirmasi Lunas' : 'Pratinjau Penagihan WhatsApp'}
+              </h3>
+              <button type="button" className="text-gray-400 hover:text-gray-600 dark:hover:text-gray-200" onClick={() => setMessageOpen(false)}>
+                <X size={20} />
+              </button>
+            </div>
+            <p className="text-xs text-gray-500 dark:text-gray-400 mb-3">
+              Pesan di bawah siap dikirimkan ke nomor WhatsApp penghuni: <b className="text-gray-700 dark:text-gray-200">{selectedGroup.tenant?.whatsapp_number || 'Tidak ada nomor'}</b>
             </p>
             <textarea
-              className="w-full font-mono text-sm border p-3 rounded bg-gray-50 text-gray-800 focus:outline-none"
+              className="w-full font-mono text-sm border border-gray-300 dark:border-gray-600 bg-gray-50 dark:bg-gray-900 text-gray-800 dark:text-gray-200 p-3 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 mb-4"
               value={message}
               onChange={e => setMessage(e.target.value)}
-              rows={15}
+              rows={12}
             />
-            <div className="form-actions mt-4">
-              <button className="primary" type="button" onClick={sendWhatsApp}>
-                <MessageCircle size={15} /> Buka & Kirim WhatsApp
+            <div className="flex items-center gap-3 justify-end">
+              <button className="inline-flex items-center gap-2 px-4 py-2 bg-green-600 hover:bg-green-700 text-white font-medium rounded-lg transition-colors" type="button" onClick={sendWhatsApp}>
+                <MessageCircle size={16} /> Buka & Kirim WhatsApp
               </button>
-              <button type="button" onClick={() => setMessageOpen(false)}>
+              <button type="button" className="px-4 py-2 text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700 font-medium rounded-lg transition-colors" onClick={() => setMessageOpen(false)}>
                 Tutup
               </button>
             </div>
