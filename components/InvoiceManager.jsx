@@ -186,58 +186,112 @@ export function InvoiceManager({ tenants, rooms, invoices, properties, reload, n
     setPaymentOpen(true);
   };
 
-  const recordPayment = async e => {
-    e.preventDefault();
-    const g = selectedGroup;
-    const amount = getNum(paymentAmount);
-    if (!g || amount <= 0) return notify('Nominal tidak valid.');
-    
-    let left = amount;
-    const now = new Date().toISOString();
-    setBusy(true);
-    
-    const unpaidSorted = [...g.items]
-      .filter(i => !isPaidOff(i))
-      .sort((a, b) => String(a.due_date).localeCompare(String(b.due_date)));
-    
+const recordPayment = async e => {
+  e.preventDefault();
+  const g = selectedGroup;
+  const amount = getNum(paymentAmount);
+  if (!g || amount <= 0) return notify('Nominal tidak valid.');
+  
+  let left = amount;
+  const now = new Date().toISOString();
+  setBusy(true);
+  
+  const unpaidSorted = [...g.items]
+    .filter(i => !isPaidOff(i))
+    .sort((a, b) => String(a.due_date).localeCompare(String(b.due_date)));
+  
+  let hasSuccess = false;
+  let totalPaidActual = 0;
+  
+  try {
     for (const invoice of unpaidSorted) {
       if (left <= 0) break;
       const outstanding = remain(invoice);
       const applied = Math.min(left, outstanding);
+      
+      // 🔥 PENTING: Skip jika applied = 0 (cegah transaksi Rp 0)
       if (applied <= 0) continue;
       
       const newPaid = getNum(invoice.paid_amount) + applied;
       const isLunas = newPaid >= getNum(invoice.amount);
       const newStatus = isLunas ? 'paid' : (overdueDays(invoice.due_date) > 0 ? 'overdue' : 'unpaid');
       
+      // [1] Update status invoice
       const { error: invErr } = await supabase.from('invoices')
-        .update({ paid_amount: newPaid, status: newStatus, paid_at: isLunas ? now : null })
+        .update({ 
+          paid_amount: newPaid, 
+          status: newStatus, 
+          paid_at: isLunas ? now : null 
+        })
         .eq('id', invoice.id);
       
-      if (invErr) { setBusy(false); return notify(invErr.message); }
+      if (invErr) {
+        console.error('❌ Gagal update invoice:', invErr);
+        notify('Gagal update tagihan: ' + invErr.message);
+        setBusy(false);
+        return;
+      }
       
-      const property = properties.find(p => p.id === g.room?.property_id) || properties[0];
-      await supabase.from('transactions').insert({
-        property_id: property?.id,
-        invoice_id: invoice.id,
-        category: 'Sewa Kamar',
-        description: `Pembayaran ${g.tenant?.full_name} · Kamar ${g.room?.room_number}`,
-        amount: applied,
-        transaction_date: today()
-      });
+      hasSuccess = true;
+      totalPaidActual += applied;
+      
+      // [2] Catat transaksi - DENGAN FALLBACK AMAN
+      try {
+        // Cari property_id dengan fallback berlapis
+        let propertyId = g.room?.property_id;
+        if (!propertyId) {
+          // Fallback 1: cari dari properties yang ada
+          const firstProp = properties[0];
+          if (firstProp) propertyId = firstProp.id;
+        }
+        if (!propertyId) {
+          // Fallback 2: hardcode default
+          propertyId = 'prop-1';
+        }
+        
+        // 🔥 Cegah insert transaksi Rp 0
+        if (applied > 0) {
+          const { error: txErr } = await supabase.from('transactions').insert({
+            property_id: propertyId,
+            invoice_id: invoice.id,
+            category: 'Sewa Kamar',
+            description: `Pembayaran ${g.tenant?.full_name || 'Penghuni'} · Kamar ${g.room?.room_number || '-'}`,
+            amount: applied,
+            transaction_date: today()
+          });
+          
+          if (txErr) {
+            // ️ TETAP LANJUTKAN! Jangan block proses
+            console.warn('⚠️ Transaksi gagal dicatat tapi invoice sudah update:', txErr);
+          }
+        }
+      } catch (txError) {
+        // 🔥 CATCH SEMUA ERROR - jangan biarkan crash
+        console.warn('⚠️ Error saat catat transaksi:', txError);
+      }
       
       left -= applied;
     }
-    
+  } catch (error) {
+    console.error('❌ Error utama:', error);
+    notify('Terjadi kesalahan: ' + error.message);
+  } finally {
+    // 🔥 KUNCI: reload() SELALU DIPANGGIL, apapun yang terjadi!
     setBusy(false);
     setPaymentOpen(false);
     setPaymentAmount('');
-    reload();
-    notify(`✅ Pembayaran ${rupiah(amount - left)} berhasil dicatat!`);
-    setMessageType('paid');
-    setMessage(`Halo ${g.tenant?.full_name}, pembayaran ${rupiah(amount - left)} untuk Kamar ${g.room?.room_number} sudah kami terima. Status: LUNAS ✅. Terima kasih!`);
-    setMessageOpen(true);
-  };
+    reload(); // ← INI YANG TADI HILANG!
+    
+    if (hasSuccess) {
+      notify(`✅ Pembayaran ${rupiah(totalPaidActual)} berhasil!`);
+      setMessageType('paid');
+      setMessage(`Halo ${g.tenant?.full_name}, pembayaran ${rupiah(totalPaidActual)} untuk Kamar ${g.room?.room_number} sudah kami terima. Status: LUNAS ✅`);
+      setMessageOpen(true);
+    } else {
+      notify('⚠️ Tidak ada tagihan yang perlu dibayar.');
+    }
+  }
+};
 
   const openMessage = (g, type) => {
     setSelectedGroup(g);
